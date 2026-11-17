@@ -193,7 +193,8 @@ struct PlaylistView: View {
                     onPlay: { model.playItem(listID: listID, itemID: item.id) },
                     onPreview: { preview = PreviewTarget(url: item.url) },
                     onRemove: { model.removeItem(item.id, from: listID) },
-                    onReveal: { model.revealInFinder(item.url) }
+                    onReveal: { model.revealInFinder(item.url) },
+                    onDurationChanged: { model.playbackOptionsChanged(for: listID) }
                 )
             }
             .onMove { source, destination in
@@ -236,6 +237,7 @@ struct PlaylistRow: View {
     let onPreview: () -> Void
     let onRemove: () -> Void
     let onReveal: () -> Void
+    let onDurationChanged: () -> Void
 
     @State private var hovering = false
 
@@ -258,6 +260,7 @@ struct PlaylistRow: View {
 
             MediaThumbnail(url: item.url, cornerRadius: 6)
                 .frame(width: 72, height: 48)
+                .onTapGesture(count: 2, perform: onPlay)
                 .overlay(alignment: .bottomLeading) { KindBadge(url: item.url).padding(4) }
                 .overlay {
                     RoundedRectangle(cornerRadius: 6)
@@ -284,12 +287,7 @@ struct PlaylistRow: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 4) {
-                TextField("", value: Binding(
-                    get: { (item.seconds / 60).rounded() },
-                    set: { item.seconds = max(60, $0 * 60) }
-                ), format: .number)
-                .frame(width: 48)
-                .multilineTextAlignment(.trailing)
+                DurationMinutesField(seconds: $item.seconds, onCommit: onDurationChanged)
                 Text("分钟").foregroundStyle(.secondary)
             }
             .font(.callout)
@@ -305,7 +303,6 @@ struct PlaylistRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2, perform: onPlay)
         .contextMenu {
             Button("从这里开始播放", action: onPlay)
             Button("大图预览", action: onPreview)
@@ -313,5 +310,35 @@ struct PlaylistRow: View {
             Divider()
             Button("从播放列表移除", action: onRemove)
         }
+    }
+}
+
+/// Keep a text draft while editing so partial input is not replaced by
+/// numeric formatting or by the row's playback gesture.
+struct DurationMinutesField: View {
+    @Binding var seconds: Double
+    var onCommit: () -> Void
+    @State private var draft = ""
+    @FocusState private var editing: Bool
+
+    var body: some View {
+        TextField("分钟", text: $draft)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 64)
+            .multilineTextAlignment(.trailing)
+            .focused($editing)
+            .accessibilityLabel("播放时长（分钟）")
+            .onAppear { refresh() }
+            .onChange(of: seconds) { _, _ in if !editing { refresh() } }
+            .onChange(of: editing) { _, focused in if !focused { commit() } }
+            .onSubmit { commit(); editing = false }
+    }
+    private func refresh() { draft = String(Int(max(1, (seconds / 60).rounded()))) }
+    private func commit() {
+        if let minutes = Double(draft.trimmingCharacters(in: .whitespacesAndNewlines)), minutes.isFinite, minutes >= 1, minutes <= 525600 {
+            let value = minutes.rounded() * 60
+            if seconds != value { seconds = value; onCommit() }
+        }
+        refresh()
     }
 }
