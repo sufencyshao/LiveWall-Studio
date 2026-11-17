@@ -1,0 +1,9 @@
+dist/
+build/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+*.mp4
+*.mov
+*.gif
+*.dmg
