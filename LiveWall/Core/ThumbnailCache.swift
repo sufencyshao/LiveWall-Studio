@@ -5,13 +5,14 @@ import ImageIO
 
 /// What kind of file a wallpaper is.
 enum MediaKind {
-    case video, image, animatedImage
+    case video, image, animatedImage, scene
 
     static let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tif", "tiff", "bmp"]
     static var allExtensions: Set<String> { videoExtensions.union(imageExtensions) }
 
     init?(url: URL) {
+        if WorkshopScene(url) != nil { self = .scene; return }
         let ext = url.pathExtension.lowercased()
         if Self.videoExtensions.contains(ext) { self = .video }
         else if ext == "gif" { self = .animatedImage }
@@ -110,6 +111,8 @@ enum ThumbnailGenerator {
             cgImage = videoFrame(url: url)
         case .image, .animatedImage:
             cgImage = imageThumbnail(url: url)
+        case .scene:
+            cgImage = WorkshopScene(url)?.poster.flatMap { imageThumbnail(url: $0) }
         case nil:
             cgImage = nil
         }

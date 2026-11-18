@@ -8,6 +8,7 @@ struct SettingsView: View {
 
     enum Pane: Hashable {
         case library
+        case trash
         case playlist(UUID)
         case displays
         case preferences
@@ -15,6 +16,7 @@ struct SettingsView: View {
         var storage: String {
             switch self {
             case .library: return "library"
+            case .trash: return "trash"
             case .playlist(let id): return "playlist:" + id.uuidString
             case .displays: return "displays"
             case .preferences: return "preferences"
@@ -28,6 +30,8 @@ struct SettingsView: View {
                 self = .displays
             } else if storage == "preferences" {
                 self = .preferences
+            } else if storage == "trash" {
+                self = .trash
             } else {
                 self = .library
             }
@@ -55,6 +59,7 @@ struct SettingsView: View {
                 HStack {
                     Menu {
                         Button("全部壁纸") { selection = .library }
+                        Button("垃圾桶") { selection = .trash }
                         Divider()
                         ForEach(library.data.lists) { list in
                             Button(list.name) { selection = .playlist(list.id) }
@@ -100,6 +105,9 @@ struct SettingsView: View {
                 Label("全部壁纸", systemImage: "photo.on.rectangle.angled")
                     .badge(library.files.count)
                     .tag(Pane.library)
+                Label("垃圾桶", systemImage: "trash")
+                    .badge(library.data.trash.count)
+                    .tag(Pane.trash)
             }
 
             SwiftUI.Section("播放列表") {
@@ -118,7 +126,7 @@ struct SettingsView: View {
                             : nil
                     )
                     .dropDestination(for: URL.self) { urls, _ in
-                        library.add(urls, to: list.id) > 0
+                        library.importDroppedFiles(urls, intoPlaylist: list.id)
                     } isTargeted: { targeted in
                         if targeted { dropTarget = list.id } else if dropTarget == list.id { dropTarget = nil }
                     }
@@ -162,13 +170,15 @@ struct SettingsView: View {
     private var detail: some View {
         switch selection ?? .library {
         case .library:
-            LibraryView(model: library, openPlaylist: { selection = .playlist($0) })
+            LibraryView(model: library, engine: engine, openPlaylist: { selection = .playlist($0) })
+        case .trash:
+            LibraryTrashView(model: library)
         case .playlist(let id):
             if library.list(id) != nil {
-                PlaylistView(model: library, listID: id, goToLibrary: { selection = .library })
+                PlaylistView(model: library, engine: engine, listID: id)
                     .id(id)
             } else {
-                LibraryView(model: library, openPlaylist: { selection = .playlist($0) })
+                LibraryView(model: library, engine: engine, openPlaylist: { selection = .playlist($0) })
             }
         case .displays:
             DisplaysView(engine: engine)
@@ -197,7 +207,7 @@ struct NowPlayingBar: View {
                 HStack(spacing: 6) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("当前壁纸").font(.caption2).foregroundStyle(.secondary)
-                        Text(url.deletingPathExtension().lastPathComponent)
+                        Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
                             .font(.caption)
                             .lineLimit(1)
                             .truncationMode(.middle)

@@ -12,6 +12,7 @@ struct PreferencesView: View {
     @State private var aerialError: String?
     @State private var aerialBusy = false
     @ObservedObject private var updateChecker = UpdateChecker.shared
+    @ObservedObject private var workshopAudio = WorkshopAudioCapture.shared
 
     var body: some View {
         ScrollView {
@@ -44,6 +45,22 @@ struct PreferencesView: View {
                 }
                 .padding(4)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if #available(macOS 14.2, *) {
+                GroupBox("场景音频") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("让场景壁纸跟随系统声音", isOn: Binding(
+                            get: { workshopAudio.enabled },
+                            set: { workshopAudio.setEnabled($0) }
+                        ))
+                        if !workshopAudio.status.isEmpty {
+                            Text(workshopAudio.status).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             GroupBox("屏幕保护程序") {

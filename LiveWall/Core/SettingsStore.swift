@@ -16,11 +16,15 @@ struct StoredAssignment: Codable {
 
 struct StoredSettings: Codable {
     var assignments: [String: StoredAssignment] = [:]
+    var wallpaperScaling: [String: ScalingMode]?
+    var wallpaperPositions: [String: FillPosition] = [:]
     var pauseOnBattery: Bool = false
     var pauseOnLowPower: Bool = true
 
     private enum CodingKeys: String, CodingKey {
         case assignments
+        case wallpaperScaling
+        case wallpaperPositions
         case pauseOnBattery
         case pauseOnLowPower
     }
@@ -35,6 +39,8 @@ struct StoredSettings: Codable {
         assignments = try container.decodeIfPresent(
             [String: StoredAssignment].self, forKey: .assignments
         ) ?? [:]
+        wallpaperScaling = try container.decodeIfPresent([String: ScalingMode].self, forKey: .wallpaperScaling)
+        wallpaperPositions = try container.decodeIfPresent([String: FillPosition].self, forKey: .wallpaperPositions) ?? [:]
         pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery) ?? false
         pauseOnLowPower = try container.decodeIfPresent(Bool.self, forKey: .pauseOnLowPower) ?? true
     }

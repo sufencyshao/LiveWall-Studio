@@ -18,9 +18,12 @@ final class WallpaperScreenController {
     private let window: WallpaperWindow
     private let playerView: PlayerView
     private var imageView: ImageWallpaperView?
+    private var sceneView: SceneWallpaperView?
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private var accessingSecurityScope = false
+    private var scaling = ScalingMode.fill
+    private var fillPosition = FillPosition.center
     private var occlusionObserver: NSObjectProtocol?
 
     init(screen: NSScreen, displayKey: String) {
@@ -50,7 +53,7 @@ final class WallpaperScreenController {
         }
     }
 
-    var hasVideo: Bool { player != nil || imageView != nil }
+    var hasVideo: Bool { player != nil || imageView != nil || sceneView != nil }
 
     /// Called after a display layout change — the NSScreen instance may have
     /// been recreated, so this just re-points at whatever the new one is.
@@ -62,15 +65,34 @@ final class WallpaperScreenController {
     func load(
         url: URL,
         scaling: ScalingMode,
+        position: FillPosition,
         muted: Bool,
         volume: Float,
         trimStart: Double? = nil,
         trimEnd: Double? = nil
     ) {
+        let workshop = WorkshopScene(url)
+        var newScene: SceneWallpaperView?
+        if let workshop {
+            newScene = SceneWallpaperView(scene: workshop, screen: screen, scaling: scaling, position: position, muted: muted, volume: volume) {
+                NSLog("LiveWall scene did not render: %@", workshop.title)
+            }
+            guard newScene != nil else { return }
+        }
         clear()
+        self.scaling = scaling
+        fillPosition = position
 
         videoURL = url
         accessingSecurityScope = url.startAccessingSecurityScopedResource()
+
+        if let newScene {
+            sceneView = newScene
+            window.contentView = newScene
+            window.setFrame(screen.frame, display: true)
+            window.orderFront(nil)
+            return
+        }
 
         if let kind = MediaKind(url: url), !kind.isVideo, let image = NSImage(contentsOf: url) {
             let view = ImageWallpaperView(
@@ -80,6 +102,7 @@ final class WallpaperScreenController {
                 scaling: scaling
             )
             imageView = view
+            view.fillPosition = position
             window.contentView = view
             window.setFrame(screen.frame, display: true)
             window.orderFront(nil)
@@ -94,8 +117,9 @@ final class WallpaperScreenController {
 
         looper = Self.makeLooper(player: queuePlayer, url: url, trimStart: trimStart, trimEnd: trimEnd)
         player = queuePlayer
-        playerView.playerLayer.player = queuePlayer
-        playerView.playerLayer.videoGravity = scaling.videoGravity
+        playerView.display(queuePlayer)
+        playerView.gravity = scaling.videoGravity
+        playerView.fillPosition = position
 
         window.setFrame(screen.frame, display: true)
         window.orderFront(nil)
@@ -139,10 +163,11 @@ final class WallpaperScreenController {
     func clear() {
         player?.pause()
         imageView = nil
+        sceneView = nil
         window.contentView = playerView
         looper?.disableLooping()
         looper = nil
-        playerView.playerLayer.player = nil
+        playerView.display(nil)
         player = nil
         window.orderOut(nil)
         if accessingSecurityScope, let videoURL {
@@ -153,24 +178,40 @@ final class WallpaperScreenController {
     }
 
     func setScaling(_ scaling: ScalingMode) {
-        playerView.playerLayer.videoGravity = scaling.videoGravity
+        self.scaling = scaling
+        playerView.gravity = scaling.videoGravity
         imageView?.apply(scaling)
+        sceneView?.setScaling(scaling)
+        sceneView?.setFillPosition(scaling == .fill ? fillPosition : .center)
+    }
+
+    func setFillPosition(_ position: FillPosition) {
+        fillPosition = position
+        playerView.fillPosition = position
+        imageView?.fillPosition = position
+        if scaling == .fill { sceneView?.setFillPosition(position) }
     }
 
     func setMuted(_ muted: Bool) {
         player?.isMuted = muted
+        sceneView?.muted = muted
     }
 
     func setVolume(_ volume: Float) {
         player?.volume = volume
+        sceneView?.volume = volume
     }
 
     func play() {
         player?.play()
+        imageView?.setPaused(false)
+        sceneView?.setPaused(false)
     }
 
     func pause() {
         player?.pause()
+        imageView?.setPaused(true)
+        sceneView?.setPaused(true)
     }
 
     func tearDown() {

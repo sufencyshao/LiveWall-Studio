@@ -19,6 +19,7 @@ struct DisplayState: Identifiable, Equatable {
 /// when a display gets covered, the Mac sleeps, or the power source changes.
 final class WallpaperEngine: ObservableObject {
     @Published private(set) var displayStates: [DisplayState] = []
+    private var manuallyPaused = false
     @Published var pauseOnBattery: Bool {
         didSet {
             persist()
@@ -101,6 +102,7 @@ final class WallpaperEngine: ObservableObject {
         }
         powerMonitor.start()
 
+        migrateWallpaperScaling()
         reconcile()
     }
 
@@ -116,6 +118,7 @@ final class WallpaperEngine: ObservableObject {
         var assignment = settings.assignments[displayKey]
             ?? StoredAssignment(bookmark: bookmark, scaling: .fill, muted: true, volume: 1.0)
         assignment.bookmark = bookmark
+        assignment.scaling = scaling(for: url)
         // A trim only makes sense for the clip it was made on, so a new
         // video starts untrimmed.
         assignment.trimStart = nil
@@ -126,6 +129,7 @@ final class WallpaperEngine: ObservableObject {
         controllers[displayKey]?.load(
             url: url,
             scaling: assignment.scaling,
+            position: fillPosition(for: url),
             muted: assignment.muted,
             volume: assignment.volume
         )
@@ -150,10 +154,10 @@ final class WallpaperEngine: ObservableObject {
     /// back to any assigned video.
     var saverVideoURL: URL? {
         if let mainKey = NSScreen.main?.displayKey,
-           let url = controllers[mainKey]?.videoURL {
+           let url = controllers[mainKey]?.videoURL, WorkshopScene(url) == nil {
             return url
         }
-        return controllers.values.compactMap { $0.videoURL }.first
+        return controllers.values.compactMap { $0.videoURL }.first { WorkshopScene($0) == nil }
     }
 
     func removeVideo(from displayKey: String) {
@@ -163,12 +167,60 @@ final class WallpaperEngine: ObservableObject {
         rebuildDisplayStates()
     }
 
-    func setScaling(_ scaling: ScalingMode, for displayKey: String) {
-        guard settings.assignments[displayKey] != nil else { return }
-        settings.assignments[displayKey]?.scaling = scaling
+    func scaling(for url: URL) -> ScalingMode {
+        settings.wallpaperScaling?[Self.wallpaperKey(for: url)] ?? .fill
+    }
+
+    func fillPosition(for url: URL) -> FillPosition {
+        settings.wallpaperPositions[Self.wallpaperKey(for: url)] ?? .center
+    }
+
+    func setFillPosition(_ position: FillPosition, for url: URL) {
+        let key = Self.wallpaperKey(for: url)
+        guard fillPosition(for: url) != position else { return }
+        objectWillChange.send()
+        settings.wallpaperPositions[key] = position == .center ? nil : position
+        for controller in controllers.values {
+            guard let current = controller.videoURL, Self.wallpaperKey(for: current) == key else { continue }
+            controller.setFillPosition(position)
+        }
+        schedulePersist()
+    }
+
+    func setScaling(_ scaling: ScalingMode, for url: URL) {
+        let wallpaperKey = Self.wallpaperKey(for: url)
+        guard self.scaling(for: url) != scaling else { return }
+        objectWillChange.send()
+        settings.wallpaperScaling?[wallpaperKey] = scaling
+        for (displayKey, controller) in controllers {
+            guard let current = controller.videoURL, Self.wallpaperKey(for: current) == wallpaperKey else { continue }
+            settings.assignments[displayKey]?.scaling = scaling
+            controller.setScaling(scaling)
+        }
         persist()
-        controllers[displayKey]?.setScaling(scaling)
         rebuildDisplayStates()
+    }
+
+    private static func wallpaperKey(for url: URL) -> String {
+        let file = url.standardizedFileURL
+        if file.lastPathComponent.lowercased() == "scene.pkg" {
+            return file.deletingLastPathComponent().appendingPathComponent("project.json").path
+        }
+        return file.path
+    }
+
+    private func migrateWallpaperScaling() {
+        guard settings.wallpaperScaling == nil else { return }
+        var modes: [String: ScalingMode] = [:]
+        let mainDisplay = NSScreen.main?.displayKey
+        for displayKey in settings.assignments.keys.sorted() {
+            guard let assignment = settings.assignments[displayKey],
+                  let url = resolveBookmark(assignment.bookmark, forKey: displayKey) else { continue }
+            let key = Self.wallpaperKey(for: url)
+            if modes[key] == nil || displayKey == mainDisplay { modes[key] = assignment.scaling }
+        }
+        settings.wallpaperScaling = modes
+        persist()
     }
 
     func setMuted(_ muted: Bool, for displayKey: String) {
@@ -177,6 +229,28 @@ final class WallpaperEngine: ObservableObject {
         persist()
         controllers[displayKey]?.setMuted(muted)
         rebuildDisplayStates()
+    }
+
+    private var audioDisplays: [DisplayState] {
+        displayStates.filter {
+            guard let url = $0.videoURL, let kind = MediaKind(url: url) else { return false }
+            return kind.isVideo || kind == .scene
+        }
+    }
+
+    var wallpaperAudioMuted: Bool? {
+        let displays = audioDisplays
+        return displays.isEmpty ? nil : displays.allSatisfy(\.isMuted)
+    }
+
+    func toggleWallpaperMute() {
+        guard let muted = wallpaperAudioMuted else { return }
+        for display in audioDisplays { setMuted(!muted, for: display.id) }
+    }
+
+    func setManuallyPaused(_ paused: Bool) {
+        manuallyPaused = paused
+        updatePlaybackStates()
     }
 
     func setTrim(start: Double?, end: Double?, for displayKey: String) {
@@ -260,7 +334,8 @@ final class WallpaperEngine: ObservableObject {
         guard let url = resolveBookmark(assignment.bookmark, forKey: key) else { return }
         controller.load(
             url: url,
-            scaling: assignment.scaling,
+            scaling: scaling(for: url),
+            position: fillPosition(for: url),
             muted: assignment.muted,
             volume: assignment.volume,
             trimStart: assignment.trimStart,
@@ -301,7 +376,7 @@ final class WallpaperEngine: ObservableObject {
     }
 
     private func updatePlaybackStates() {
-        let globallyPaused = isSystemSleeping || isSessionInactive
+        let globallyPaused = manuallyPaused || isSystemSleeping || isSessionInactive
             || (pauseOnBattery && isOnBattery)
             || (pauseOnLowPower && isLowPowerMode)
         for controller in controllers.values {
@@ -388,7 +463,7 @@ final class WallpaperEngine: ObservableObject {
                 name: screen.localizedName,
                 resolutionText: pixels,
                 videoURL: controller.videoURL,
-                scaling: assignment?.scaling ?? .fill,
+                scaling: controller.videoURL.map { scaling(for: $0) } ?? .fill,
                 isMuted: assignment?.muted ?? true,
                 volume: assignment?.volume ?? 1.0,
                 trimStart: assignment?.trimStart,

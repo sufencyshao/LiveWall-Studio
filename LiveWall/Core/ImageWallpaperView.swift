@@ -8,7 +8,9 @@ final class ImageWallpaperView: NSView {
     private let image: NSImage
     private let isAnimated: Bool
     private var imageView: NSImageView?
+    private let stillLayer = CALayer()
     private var scaling: ScalingMode
+    var fillPosition: FillPosition = .center { didSet { needsLayout = true } }
 
     init(frame: NSRect, image: NSImage, animated: Bool, scaling: ScalingMode) {
         self.image = image
@@ -22,13 +24,13 @@ final class ImageWallpaperView: NSView {
 
         if animated {
             let view = NSImageView(frame: bounds)
-            view.autoresizingMask = [.width, .height]
             view.animates = true
             view.image = image
             addSubview(view)
             imageView = view
         } else {
-            layer?.contents = image.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? image
+            stillLayer.contents = image.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? image
+            layer?.addSublayer(stillLayer)
         }
         apply(scaling)
     }
@@ -40,41 +42,31 @@ final class ImageWallpaperView: NSView {
 
     func apply(_ scaling: ScalingMode) {
         self.scaling = scaling
-        if let imageView {
-            // NSImageView has no aspect-fill, so for "fill" the view is
-            // grown past the window edges and the overflow gets clipped.
-            imageView.imageScaling = scaling == .stretch ? .scaleAxesIndependently : .scaleProportionallyUpOrDown
-            layoutAnimatedView()
-        } else {
-            switch scaling {
-            case .fill: layer?.contentsGravity = .resizeAspectFill
-            case .fit: layer?.contentsGravity = .resizeAspect
-            case .stretch: layer?.contentsGravity = .resize
-            }
+        imageView?.imageScaling = scaling == .stretch ? .scaleAxesIndependently : .scaleProportionallyUpOrDown
+        switch scaling {
+        case .fill: stillLayer.contentsGravity = .resizeAspectFill
+        case .fit: stillLayer.contentsGravity = .resizeAspect
+        case .stretch: stillLayer.contentsGravity = .resize
         }
+        needsLayout = true
+    }
+
+    func setPaused(_ paused: Bool) {
+        imageView?.animates = !paused
     }
 
     override func layout() {
         super.layout()
-        layoutAnimatedView()
-    }
-
-    private func layoutAnimatedView() {
-        guard let imageView else { return }
-        let size = image.size
-        guard scaling == .fill, size.width > 0, size.height > 0, bounds.width > 0, bounds.height > 0 else {
-            imageView.autoresizingMask = [.width, .height]
-            imageView.frame = bounds
-            return
+        let frame = scaling == .fill
+            ? fillPosition.cropFrame(for: image.size, in: bounds, flipped: isFlipped)
+            : bounds
+        if let imageView {
+            imageView.frame = frame
+        } else {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            stillLayer.frame = frame
+            CATransaction.commit()
         }
-        let scale = max(bounds.width / size.width, bounds.height / size.height)
-        let filled = NSSize(width: size.width * scale, height: size.height * scale)
-        imageView.autoresizingMask = []
-        imageView.frame = NSRect(
-            x: (bounds.width - filled.width) / 2,
-            y: (bounds.height - filled.height) / 2,
-            width: filled.width,
-            height: filled.height
-        )
     }
 }

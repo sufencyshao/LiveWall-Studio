@@ -1,0 +1,152 @@
+--- a/Renderer/Engine/src/Audio/AudioResponseService.cpp
++++ b/Renderer/Engine/src/Audio/AudioResponseService.cpp
+@@ -21,9 +21,9 @@
+ 
+ constexpr uint32_t kAnalysisSampleRate = kAudioResponseSampleRate;
+ constexpr uint32_t kWindowSize = kAudioResponseWindowFrames;
+-// Windows follow each other without overlap, so where one starts never
+-// depends on how the input happened to be chunked.
+-constexpr uint32_t kHopSize = kWindowSize;
++// Keep the same frequency resolution, but publish at 60 Hz. Window positions
++// are still independent of how Core Audio splits the input into callbacks.
++constexpr uint32_t kHopSize = kWindowSize / 2;
+ constexpr size_t kInterleavedChannels = 2u;
+ constexpr size_t kMaxRetainedMonoFrames = static_cast<size_t>(kAnalysisSampleRate) * 2u;
+ constexpr auto kSnapshotStaleAfter = std::chrono::milliseconds(250);
+@@ -212,7 +212,7 @@
+             g_state.last_submit_time = Clock::time_point {};
+             continue;
+         }
+-        if (RetainedFramesLocked() >= kHopSize) {
++        if (RetainedFramesLocked() >= kWindowSize) {
+             if (!AnalyzeNextBlock(lock, stop_token)) {
+                 return;
+             }
+@@ -220,13 +220,13 @@
+         }
+         if (NeverSubmittedLocked()) {
+             g_state.condition.wait(lock, stop_token, [] {
+-                return RetainedFramesLocked() >= kHopSize || !NeverSubmittedLocked();
++                return RetainedFramesLocked() >= kWindowSize || !NeverSubmittedLocked();
+             });
+         } else {
+             const auto seen = g_state.last_submit_time;
+             g_state.condition.wait_until(
+                 lock, stop_token, seen + kSnapshotStaleAfter,
+-                [seen] { return RetainedFramesLocked() >= kHopSize || g_state.last_submit_time != seen; });
++                [seen] { return RetainedFramesLocked() >= kWindowSize || g_state.last_submit_time != seen; });
+         }
+     }
+ }
+--- a/Renderer/Engine/src/Runtime/SceneRuntimeContext.cpp
++++ b/Renderer/Engine/src/Runtime/SceneRuntimeContext.cpp
+@@ -5100,11 +5100,32 @@
+ 
+ const audio::AudioSpectrumSnapshot& SceneRuntimeContext::CurrentAudioSpectrumSnapshot() const {
+     if (m_frame_audio_spectrum_taken) return m_frame_audio_spectrum;
+-    // One copy under the analysis lock per frame, not one per pass, particle and script read:
+-    // the analysis publishes 30 spectra a second, so reads spread over one frame's encode
+-    // otherwise drew some bars from one window and some from the next.
+-    m_frame_audio_spectrum = AudioResponseActive() ? audio::CurrentAudioSpectrumSnapshot()
+-                                                   : audio::AudioSpectrumSnapshot {};
++    // All shader, particle and script consumers see the same envelope for a frame.
++    const bool active = AudioResponseActive();
++    auto spectrum = active ? audio::CurrentAudioSpectrumSnapshot() : audio::AudioSpectrumSnapshot {};
++    if (active && m_audio_frames_begun) {
++        const auto fps = m_scene && m_scene->targetFps ? m_scene->targetFps : 30u;
++        const float seconds = 1.0f / fps;
++        const float attack = 1.0f - std::exp(-seconds / 0.026f);
++        const float release = 1.0f - std::exp(-seconds / 0.130f);
++        const auto envelope = [attack, release](auto& bands, const auto& previous) {
++            for (std::size_t i = 0; i < bands.size(); ++i) {
++                const float delta = bands[i] - previous[i];
++                bands[i] = previous[i] + (delta > 0.0f ? attack : release) * delta;
++                if (bands[i] < 0.001f) bands[i] = 0.0f;
++            }
++        };
++        envelope(spectrum.left64, m_frame_audio_spectrum.left64);
++        envelope(spectrum.right64, m_frame_audio_spectrum.right64);
++        envelope(spectrum.average64, m_frame_audio_spectrum.average64);
++        envelope(spectrum.left32, m_frame_audio_spectrum.left32);
++        envelope(spectrum.right32, m_frame_audio_spectrum.right32);
++        envelope(spectrum.average32, m_frame_audio_spectrum.average32);
++        envelope(spectrum.left16, m_frame_audio_spectrum.left16);
++        envelope(spectrum.right16, m_frame_audio_spectrum.right16);
++        envelope(spectrum.average16, m_frame_audio_spectrum.average16);
++    }
++    m_frame_audio_spectrum = spectrum;
+     m_frame_audio_spectrum_taken = m_audio_frames_begun;
+     return m_frame_audio_spectrum;
+ }
+--- a/Renderer/Engine/src/Scene/WPShaderValueUpdater.cpp
++++ b/Renderer/Engine/src/Scene/WPShaderValueUpdater.cpp
+@@ -285,6 +285,11 @@
+     return info.has_AudioSpectrum16Left || info.has_AudioSpectrum16Right ||
+            info.has_AudioSpectrum32Left || info.has_AudioSpectrum32Right ||
+            info.has_AudioSpectrum64Left || info.has_AudioSpectrum64Right;
++}
++
++bool KeepQuietBarsVisible(const SceneMaterial* material, const SceneRuntimeContext* runtime) {
++    return material != nullptr && runtime != nullptr && runtime->AudioResponseActive() &&
++           material->name == "workshop/2084198056/effects/Simple_Audio_Bars";
+ }
+ 
+ /// Each spectrum array the material binds, with the bands of `snapshot` it carries, in one
+@@ -292,13 +297,24 @@
+ /// redrawn for is exactly what its uniforms hold.
+ template <typename Op>
+ void ForEachBoundSpectrum(const WPUniformInfo& info, const audio::AudioSpectrumSnapshot& snapshot,
+-                          Op&& op) {
+-    if (info.has_AudioSpectrum16Left) op(G_AUDIO16_LEFT, std::span<const float>(snapshot.left16));
+-    if (info.has_AudioSpectrum16Right) op(G_AUDIO16_RIGHT, std::span<const float>(snapshot.right16));
+-    if (info.has_AudioSpectrum32Left) op(G_AUDIO32_LEFT, std::span<const float>(snapshot.left32));
+-    if (info.has_AudioSpectrum32Right) op(G_AUDIO32_RIGHT, std::span<const float>(snapshot.right32));
+-    if (info.has_AudioSpectrum64Left) op(G_AUDIO64_LEFT, std::span<const float>(snapshot.left64));
+-    if (info.has_AudioSpectrum64Right) op(G_AUDIO64_RIGHT, std::span<const float>(snapshot.right64));
++                          bool keepQuietBarsVisible, Op&& op) {
++    const auto emit = [&](std::string_view name, const auto& bands) {
++        if (keepQuietBarsVisible) {
++            // This effect turns zero-height bands into holes. Keep a short
++            // dash in the visualizer without raising other audio-driven effects.
++            auto visible = bands;
++            for (auto& band : visible) band = std::max(band, 0.045f);
++            op(name, std::span<const float>(visible));
++        } else {
++            op(name, std::span<const float>(bands));
++        }
++    };
++    if (info.has_AudioSpectrum16Left) emit(G_AUDIO16_LEFT, snapshot.left16);
++    if (info.has_AudioSpectrum16Right) emit(G_AUDIO16_RIGHT, snapshot.right16);
++    if (info.has_AudioSpectrum32Left) emit(G_AUDIO32_LEFT, snapshot.left32);
++    if (info.has_AudioSpectrum32Right) emit(G_AUDIO32_RIGHT, snapshot.right32);
++    if (info.has_AudioSpectrum64Left) emit(G_AUDIO64_LEFT, snapshot.left64);
++    if (info.has_AudioSpectrum64Right) emit(G_AUDIO64_RIGHT, snapshot.right64);
+ }
+ 
+ /// Folds the bands two at a time: each 64-bit word goes into the state through the SplitMix64
+@@ -1189,9 +1205,11 @@
+     // ---- audio spectrum, one value per vec4 element
+     if (ReadsAudioSpectrum(*info)) {
+         static const audio::AudioSpectrumSnapshot silence {};
++        const auto* runtime = m_scene->runtime.get();
+         const audio::AudioSpectrumSnapshot& snapshot =
+-            m_scene->runtime != nullptr ? m_scene->runtime->CurrentAudioSpectrumSnapshot() : silence;
+-        ForEachBoundSpectrum(*info, snapshot, [&](std::string_view name, std::span<const float> bands) {
++            runtime != nullptr ? runtime->CurrentAudioSpectrumSnapshot() : silence;
++        ForEachBoundSpectrum(*info, snapshot, KeepQuietBarsVisible(material, runtime),
++                             [&](std::string_view name, std::span<const float> bands) {
+             m_audioPack.assign(bands.size() * 4, 0.0f);
+             for (std::size_t i = 0; i < bands.size(); ++i) m_audioPack[i * 4] = bands[i];
+             write(name, m_audioPack);
+@@ -1214,7 +1232,10 @@
+     const audio::AudioSpectrumSnapshot& snapshot =
+         runtime != nullptr ? runtime->CurrentAudioSpectrumSnapshot() : silence;
+     uint64_t hash = 0xcbf29ce484222325ULL;
+-    ForEachBoundSpectrum(*info, snapshot, [&hash](std::string_view, std::span<const float> bands) {
++    const auto* mesh = node->Mesh();
++    const auto* material = mesh != nullptr ? mesh->MaterialForSlot(material_slot) : nullptr;
++    ForEachBoundSpectrum(*info, snapshot, KeepQuietBarsVisible(material, runtime),
++                         [&hash](std::string_view, std::span<const float> bands) {
+         hash = HashBands(hash, bands);
+     });
+     return hash;

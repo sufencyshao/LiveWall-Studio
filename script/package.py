@@ -1,35 +1,161 @@
 #!/usr/bin/env python3
-"""Build an isolated application bundle from this repository's sources."""
-import os, platform, plistlib, shutil, subprocess
+"""Build an Apple-silicon LiveWall Studio disk image from the release sources."""
+import os
+import platform
+import plistlib
+import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
-root = Path(__file__).resolve().parent.parent
-out = root / 'dist'
-version = '1.2.1'
-arch = os.environ.get('LIVEWALL_ARCH', platform.machine())
-env = dict(os.environ)
-if not env.get('DEVELOPER_DIR') and Path('/Library/Developer/CommandLineTools').exists():
-    env['DEVELOPER_DIR'] = '/Library/Developer/CommandLineTools'
-def run(*args): subprocess.run([str(a) for a in args], check=True, env=env)
-app = out / 'LiveWall.app'
-if app.exists(): shutil.rmtree(app)
-macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
-macos.mkdir(parents=True); resources.mkdir()
-run('xcrun', 'swiftc', '-swift-version', '5', '-O', '-target', f'{arch}-apple-macosx14.0', *sorted((root/'LiveWall').rglob('*.swift')), '-o', macos/'LiveWall')
-info = dict(CFBundleExecutable='LiveWall', CFBundleIdentifier='com.livewall.app', CFBundleName='LiveWall', CFBundleDisplayName='LiveWall Studio', CFBundlePackageType='APPL', CFBundleShortVersionString=version, CFBundleVersion='121', CFBundleDevelopmentRegion='zh_CN', CFBundleLocalizations=['zh-Hans'], LSMinimumSystemVersion='14.0', LSUIElement=True, NSPrincipalClass='NSApplication', CFBundleIconFile='AppIcon')
-(app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
-icons = out/'AppIcon.iconset'
-icons.mkdir(exist_ok=True)
-for p in (root/'LiveWall/Resources/Assets.xcassets/AppIcon.appiconset').glob('*.png'): shutil.copy2(p, icons/p.name)
-run('iconutil', '-c', 'icns', icons, '-o', resources/'AppIcon.icns')
-saver = resources/'LiveWallSaver.saver/Contents'
-(saver/'MacOS').mkdir(parents=True)
-run('xcrun','swiftc','-swift-version','5','-O','-emit-library','-target',f'{arch}-apple-macosx14.0',root/'LiveWallSaver/LiveWallSaverView.swift','-o',saver/'MacOS/LiveWallSaver')
-(saver/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleExecutable='LiveWallSaver',CFBundleIdentifier='com.livewall.app.saver',CFBundleName='LiveWallSaver',CFBundlePackageType='BNDL',CFBundleShortVersionString=version,CFBundleVersion='121',LSMinimumSystemVersion='14.0',NSPrincipalClass='LiveWallSaverView')))
-shutil.copy2(root/'LICENSE', resources/'LICENSE')
-run('codesign','--force','--sign','-',resources/'LiveWallSaver.saver')
-run('codesign','--force','--sign','-',app)
-run('codesign','--verify','--deep','--strict',app)
-zip_path=out/f'LiveWall-Studio-{version}-macOS-{arch}.zip'
-if zip_path.exists(): zip_path.unlink()
-run('ditto','-c','-k','--keepParent',app,zip_path)
-print(zip_path)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DIST = ROOT / "dist"
+RENDERER = DIST / "renderer"
+VERSION = (ROOT / "VERSION").read_text().strip()
+BUILD = "130"
+MINIMUM_MACOS = "15.0"
+LIBRARIES = {
+    "quickjs-ng": ["libqjs.0.dylib"],
+    "lz4": ["liblz4.1.dylib"],
+    "libpng": ["libpng16.16.dylib"],
+    "brotli": ["libbrotlidec.1.dylib", "libbrotlicommon.1.dylib"],
+}
+
+
+def run(*arguments):
+    subprocess.run([str(arg) for arg in arguments], check=True)
+
+
+def plist(path, **values):
+    path.write_bytes(plistlib.dumps(values))
+
+
+def check_minimum(binary):
+    build = subprocess.check_output(["xcrun", "vtool", "-show-build", str(binary)], text=True)
+    minimum = tuple(map(int, MINIMUM_MACOS.split(".")))
+    versions = re.findall(r"^\s*minos\s+(\d+(?:\.\d+)+)", build, re.MULTILINE)
+    if not versions or any(tuple(map(int, version.split("."))) > minimum for version in versions):
+        raise RuntimeError(f"{binary.name} has incompatible minimum OS metadata")
+    architectures = subprocess.check_output(["lipo", "-archs", str(binary)], text=True).split()
+    if architectures != ["arm64"]:
+        raise RuntimeError(f"{binary.name} is not an arm64-only binary")
+
+
+def link_and_sign(frameworks):
+    libraries = list(frameworks.glob("*.dylib"))
+    names = {path.name for path in libraries}
+    for library in libraries:
+        check_minimum(library)
+        library.chmod(0o755)
+        links = subprocess.check_output(["otool", "-L", str(library)], text=True).splitlines()[2:]
+        changes = ["-id", f"@loader_path/{library.name}"]
+        for line in links:
+            dependency = line.strip().split(" (", 1)[0]
+            name = Path(dependency).name
+            if name in names:
+                changes.extend(["-change", dependency, f"@loader_path/{name}"])
+            elif not dependency.startswith(("/System/Library/", "/usr/lib/")):
+                raise RuntimeError(f"Unbundled dependency: {dependency}")
+        run("install_name_tool", *changes, library)
+        run("codesign", "--force", "--sign", "-", library)
+
+
+def copy_notice(notice, target):
+    if notice.is_dir():
+        shutil.copytree(notice, target)
+    else:
+        shutil.copy2(notice, target)
+
+
+def make_app(stage):
+    app = stage / "LiveWall.app"
+    contents = app / "Contents"
+    macos = contents / "MacOS"
+    resources = contents / "Resources"
+    frameworks = contents / "Frameworks"
+    licenses = resources / "Licenses"
+    for path in [macos, licenses, frameworks]:
+        path.mkdir(parents=True)
+
+    target = "arm64-apple-macosx15.0"
+    run("xcrun", "swiftc", "-swift-version", "5", "-O", "-target", target,
+        *sorted((ROOT / "LiveWall").rglob("*.swift")), "-o", macos / "LiveWall")
+    check_minimum(macos / "LiveWall")
+    plist(contents / "Info.plist",
+          CFBundleExecutable="LiveWall", CFBundleIdentifier="com.livewall.app",
+          CFBundleName="LiveWall", CFBundleDisplayName="LiveWall", CFBundlePackageType="APPL",
+          CFBundleShortVersionString=VERSION, CFBundleVersion=BUILD,
+          CFBundleDevelopmentRegion="zh_CN", CFBundleLocalizations=["zh-Hans", "en"],
+          LSMinimumSystemVersion=MINIMUM_MACOS, LSUIElement=True, NSPrincipalClass="NSApplication",
+          CFBundleIconFile="AppIcon", LSApplicationCategoryType="public.app-category.entertainment",
+          NSAudioCaptureUsageDescription="LiveWall 读取电脑正在播放的声音，用于实时绘制场景壁纸的频谱。音频不会保存或上传。")
+    icons = stage.parent / "AppIcon.iconset"
+    icons.mkdir()
+    for icon in (ROOT / "LiveWall/Resources/Assets.xcassets/AppIcon.appiconset").glob("*.png"):
+        shutil.copy2(icon, icons / icon.name)
+    run("iconutil", "-c", "icns", icons, "-o", resources / "AppIcon.icns")
+
+    saver = resources / "LiveWallSaver.saver"
+    (saver / "Contents/MacOS").mkdir(parents=True)
+    executable = saver / "Contents/MacOS/LiveWallSaver"
+    run("xcrun", "swiftc", "-swift-version", "5", "-O", "-emit-library", "-target", target,
+        ROOT / "LiveWallSaver/LiveWallSaverView.swift", "-o", executable)
+    check_minimum(executable)
+    plist(saver / "Contents/Info.plist",
+          CFBundleExecutable="LiveWallSaver", CFBundleIdentifier="com.livewall.app.saver",
+          CFBundleName="LiveWallSaver", CFBundlePackageType="BNDL",
+          CFBundleShortVersionString=VERSION, CFBundleVersion=BUILD,
+          LSMinimumSystemVersion=MINIMUM_MACOS, NSPrincipalClass="LiveWallSaverView")
+
+    source = RENDERER / "sources"
+    shutil.copy2(ROOT / "LICENSE", licenses / "LiveWall-MIT.txt")
+    shutil.copy2(ROOT / "renderer/COPYING", licenses / "GPL-3.0.txt")
+    shutil.copy2(ROOT / "renderer/UPSTREAM-LICENSING.md", licenses / "WallpaperMachine.md")
+    third_party = source / "wallpapermachine/ThirdParty"
+    for vendor in ("freetype", "harfbuzz", "miniaudio", "msdfgen", "naga", "stb_image", "stb_vorbis"):
+        directory = third_party / vendor
+        for notice in list(directory.glob("LICENSE*")) + list(directory.glob("COPYING*")):
+            copy_notice(notice, licenses / f"{vendor}-{notice.name}")
+    shutil.copytree(third_party / "freetype/docs", licenses / "freetype-docs",
+                    ignore=lambda _, names: [name for name in names if name not in {"FTL.TXT", "GPLv2.TXT"}])
+    shutil.copytree(RENDERER / "rust-notices", licenses / "Rust")
+    for vendor in (*LIBRARIES, "nlohmann-json", "argparse"):
+        for notice in (source / vendor).glob("LICENSE*"):
+            copy_notice(notice, licenses / f"{vendor}-{notice.name}")
+
+    shutil.copy2(RENDERER / "engine/libLiveWallScene.dylib", frameworks)
+    for vendor, names in LIBRARIES.items():
+        for name in names:
+            shutil.copy2(RENDERER / "runtime" / vendor / "lib" / name, frameworks)
+    link_and_sign(frameworks)
+    run("codesign", "--force", "--sign", "-", saver)
+    run("codesign", "--force", "--sign", "-", app)
+    run("codesign", "--verify", "--deep", "--strict", app)
+    return app
+
+
+def main():
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise SystemExit("Run the package build on an Apple-silicon Mac.")
+    if not (RENDERER / "engine/libLiveWallScene.dylib").is_file():
+        raise SystemExit("Build the native renderer with script/build-renderer.sh first.")
+    DIST.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="livewall-package-") as temporary:
+        stage = Path(temporary) / "disk"
+        stage.mkdir()
+        app = make_app(stage)
+        (stage / "Applications").symlink_to("/Applications", target_is_directory=True)
+        filename = f"LiveWall-Studio-{VERSION}-macOS-arm64.dmg"
+        image = Path(temporary) / filename
+        run("hdiutil", "create", "-quiet", "-fs", "HFS+", "-format", "UDZO",
+            "-volname", f"LiveWall Studio {VERSION}", "-srcfolder", stage, image)
+        run("hdiutil", "verify", image)
+        output = DIST / filename
+        shutil.move(image, output)
+        print(output)
+
+
+if __name__ == "__main__":
+    main()

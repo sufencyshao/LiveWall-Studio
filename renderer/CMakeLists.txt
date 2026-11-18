@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(LiveWallScene LANGUAGES C CXX OBJCXX)
+set(CMAKE_CXX_STANDARD 20)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory("${WALLPAPER_MACHINE_SOURCE}/Renderer/Engine" engine)
+add_library(LiveWallScene SHARED SceneBridge.mm SystemAudioTap.mm)
+target_compile_options(LiveWallScene PRIVATE -fobjc-arc)
+target_link_libraries(LiveWallScene PRIVATE wescene::renderer "-framework AppKit" "-framework QuartzCore")

@@ -31,7 +31,7 @@ struct DisplayCardView: View {
             dropZone
 
             if let url = state.videoURL {
-                Text(url.lastPathComponent)
+                Text(WorkshopScene(url)?.title ?? url.lastPathComponent)
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -105,17 +105,10 @@ struct DisplayCardView: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            Picker("缩放方式", selection: Binding(
-                get: { state.scaling },
-                set: { engine.setScaling($0, for: state.id) }
-            )) {
-                ForEach(ScalingMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 90)
-            .disabled(state.videoURL == nil)
+            WallpaperScalingPicker(engine: engine, url: state.videoURL)
+                .labelsHidden()
+                .frame(width: 90)
+                .help("当前壁纸的缩放方式")
 
             Button {
                 engine.setMuted(!state.isMuted, for: state.id)

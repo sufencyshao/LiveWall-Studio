@@ -18,8 +18,8 @@ final class UpdateChecker: ObservableObject {
 
     @Published private(set) var status: Status = .idle
 
-    static let releasesPageURL = URL(string: "https://github.com/sufencyshao/LiveWall-Studio/releases")!
-    private static let apiURL = URL(string: "https://api.github.com/repos/sufencyshao/LiveWall-Studio/releases")!
+    static let releasesPageURL = URL(string: "https://github.com/sufencyshao/LiveWall-Studio/releases/latest")!
+    private static let apiURL = URL(string: "https://api.github.com/repos/sufencyshao/LiveWall-Studio/releases/latest")!
     private static let lastCheckKey = "LiveWallLastUpdateCheck"
 
     var currentVersion: String {
@@ -45,8 +45,7 @@ final class UpdateChecker: ObservableObject {
             var request = URLRequest(url: Self.apiURL)
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             let (data, _) = try await URLSession.shared.data(for: request)
-            guard let objects = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-                  let object = objects.first(where: { ($0["draft"] as? Bool) != true }),
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = object["tag_name"] as? String else {
                 if !quiet { status = .failed }
                 return

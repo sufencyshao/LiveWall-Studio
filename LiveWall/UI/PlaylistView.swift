@@ -5,13 +5,15 @@ import SwiftUI
 /// every wallpaper in it with its own preview, as a list or a grid.
 struct PlaylistView: View {
     @ObservedObject var model: LibraryModel
+    let engine: WallpaperEngine
     let listID: UUID
-    var goToLibrary: () -> Void = {}
 
     @AppStorage("LiveWallPlaylistGrid") private var gridMode = false
     @State private var preview: PreviewTarget?
+    @State private var addingWallpapers = false
     @State private var dropTargeted = false
     @State private var bulkMinutes: Double = 60
+    @State private var editingBulkDuration = false
 
     /// Bound by id rather than index, so deleting the list while this view
     /// is still on screen can't crash on a stale index.
@@ -29,17 +31,15 @@ struct PlaylistView: View {
     var body: some View {
         GeometryReader { geometry in
         VStack(spacing: 0) {
-            ScrollView { header(width: geometry.size.width) }
-                .frame(height: min(300, geometry.size.height * 0.55))
+            header
             Divider()
             if list.wrappedValue.items.isEmpty {
                 EmptyStateView(
                     symbol: "rectangle.stack.badge.plus",
                     title: "这个播放列表还是空的",
-                    detail: "把壁纸从「全部壁纸」拖到这里（或拖到左侧的列表名上），也可以在壁纸上右键 › 加入播放列表。Finder 里的文件也能直接拖进来。",
-                    button: "去壁纸库挑选",
-                    action: goToLibrary
-                )
+                    detail: "点击「添加壁纸」，从壁纸库选择要加入的壁纸。",
+                    button: nil
+                ) {}
             } else if gridMode {
                 grid(width: geometry.size.width)
             } else {
@@ -60,16 +60,19 @@ struct PlaylistView: View {
         }
         .overlay(alignment: .bottom) { Toast(text: model.message) }
         .dropDestination(for: URL.self) { urls, _ in
-            model.add(urls, to: listID) > 0
+            model.importDroppedFiles(urls, intoPlaylist: listID)
         } isTargeted: { dropTargeted = $0 }
         .sheet(item: $preview) { target in
-            WallpaperPreviewSheet(url: target.url) {
+            WallpaperPreviewSheet(engine: engine, url: target.url) {
                 if let item = list.wrappedValue.items.first(where: { $0.path == target.url.path }) {
                     model.playItem(listID: listID, itemID: item.id)
                 } else {
                     model.use(target.url)
                 }
             }
+        }
+        .sheet(isPresented: $addingWallpapers) {
+            PlaylistWallpaperPicker(model: model, listID: listID)
         }
         .onAppear {
             if let first = list.wrappedValue.items.first { bulkMinutes = (first.seconds / 60).rounded() }
@@ -84,79 +87,140 @@ struct PlaylistView: View {
         return items.first?.url
     }
 
-    private func header(width: CGFloat) -> some View {
-        let compact = width < 720
-        let layout = compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 18))
-        return layout {
-            Group {
-                if let coverURL {
-                    MediaThumbnail(url: coverURL, cornerRadius: 10)
-                } else {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.quaternary)
-                        .overlay(Image(systemName: "music.note.list").font(.largeTitle).foregroundStyle(.secondary))
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Group {
+                    if let coverURL {
+                        MediaThumbnail(url: coverURL, cornerRadius: 7)
+                    } else {
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(.quaternary)
+                            .overlay(Image(systemName: "music.note.list").foregroundStyle(.secondary))
+                    }
+                }
+                .frame(width: 82, height: 48)
+                .clipped()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    TextField("播放列表名称", text: list.name)
+                        .textFieldStyle(.plain)
+                        .font(.title3.bold())
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if isActive { statusLine }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    playbackControls
+                    Spacer(minLength: 4)
+                    libraryControls
+                }
+                .fixedSize(horizontal: true, vertical: false)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    ViewThatFits(in: .horizontal) {
+                        playbackControls.fixedSize(horizontal: true, vertical: false)
+                        playbackControls.labelStyle(.iconOnly)
+                    }
+                    libraryControls
                 }
             }
-            .frame(width: compact ? min(180, max(100, width - 36)) : 240, height: compact ? 90 : 135)
-            .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+        }
+        .controlSize(.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("播放列表").font(.caption).foregroundStyle(.secondary)
-                TextField("播放列表名称", text: list.name)
-                    .textFieldStyle(.plain)
-                    .font(.title.bold())
-                Text(summary)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                if isActive { statusLine }
+    private var playbackControls: some View {
+        HStack(spacing: 6) {
+            if isActive {
+                Button { model.stop() } label: { Label("停止轮换", systemImage: "stop.fill") }
+                    .help("停止轮换")
+            } else {
+                Button { model.start(listID) } label: { Label("播放", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(list.wrappedValue.items.isEmpty)
+                    .help("播放")
+            }
+            Group {
+                Button { model.switchWallpaper(.previous, in: listID) } label: {
+                    Label("上一个壁纸", systemImage: "backward.end.fill")
+                }.help("上一个壁纸")
+                Button { model.switchWallpaper(.next, in: listID) } label: {
+                    Label("下一个壁纸", systemImage: "forward.end.fill")
+                }.help("下一个壁纸")
+                Button { model.switchWallpaper(.random, in: listID) } label: {
+                    Label("随机一个", systemImage: "die.face.5")
+                }.help("随机一个")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(list.wrappedValue.items.isEmpty)
+            Button { model.togglePause() } label: {
+                Label(model.isPaused ? "继续播放" : "暂停播放",
+                      systemImage: model.isPaused ? "play.circle" : "pause.circle")
+            }
+            .labelStyle(.iconOnly)
+            .help(model.isPaused ? "继续播放" : "暂停播放并停在当前画面")
+            .disabled(engine.displayStates.allSatisfy { $0.videoURL == nil })
+            Toggle(isOn: list.random) { Label("随机", systemImage: "shuffle") }
+                .toggleStyle(.button)
+                .help("随机")
+            Toggle(isOn: Binding(
+                get: { list.wrappedValue.repeatOne },
+                set: { list.wrappedValue.repeatOne = $0; model.playbackOptionsChanged(for: listID) }
+            )) { Label("单个循环", systemImage: "repeat.1") }
+                .toggleStyle(.button)
+                .help("一直使用当前壁纸，不自动切换")
+        }
+    }
 
-                HStack(spacing: 8) {
-                    if isActive {
-                        Button { model.stop() } label: { Label("停止轮换", systemImage: "stop.fill") }
-                        Button { model.previous() } label: { Image(systemName: "backward.fill") }.help("上一个")
-                        Button { model.next() } label: { Image(systemName: "forward.fill") }.help("下一个")
-                    } else {
-                        Button { model.start(listID) } label: { Label("播放", systemImage: "play.fill") }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(list.wrappedValue.items.isEmpty)
-                    }
-                    Divider().frame(height: 18)
-                    Toggle(isOn: list.random) { Label("随机", systemImage: "shuffle") }
-                        .toggleStyle(.button)
-                    Toggle(isOn: Binding(
-                        get: { list.wrappedValue.repeatOne },
-                        set: { list.wrappedValue.repeatOne = $0; model.playbackOptionsChanged(for: listID) }
-                    )) { Label("单个循环", systemImage: "repeat.1") }
-                        .toggleStyle(.button)
-                        .help("一直使用当前壁纸，不自动切换")
-                }
-                HStack {
-                    Picker("布局", selection: $gridMode) {
-                        Image(systemName: "list.bullet").tag(false)
-                        Image(systemName: "square.grid.2x2").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                    .help("列表 / 网格")
-                }
-                .controlSize(.regular)
+    private var libraryControls: some View {
+        HStack(spacing: 6) {
+            Picker("布局", selection: $gridMode) {
+                Image(systemName: "list.bullet").tag(false)
+                Image(systemName: "square.grid.2x2").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("列表 / 网格")
 
+            Button {
+                model.refresh()
+                addingWallpapers = true
+            } label: {
+                Label("添加壁纸", systemImage: "plus")
+            }
+
+            Button { editingBulkDuration = true } label: {
+                Label("批量设置时长", systemImage: "clock")
+                    .labelStyle(.iconOnly)
+            }
+            .help("批量设置时长")
+            .disabled(list.wrappedValue.items.isEmpty)
+            .popover(isPresented: $editingBulkDuration) {
                 HStack(spacing: 6) {
-                    Text("每个壁纸显示")
-                    TextField("", value: $bulkMinutes, format: .number)
+                    Text("每张壁纸")
+                    TextField("分钟", value: $bulkMinutes, format: .number)
                         .frame(width: 52)
                         .multilineTextAlignment(.trailing)
                     Text("分钟")
-                    Button("应用到全部") { model.setAllDurations(minutes: bulkMinutes, in: listID) }
-                        .disabled(list.wrappedValue.items.isEmpty)
+                    Button("应用到全部") {
+                        model.setAllDurations(minutes: bulkMinutes, in: listID)
+                        editingBulkDuration = false
+                    }
+                    .keyboardShortcut(.defaultAction)
                 }
-                .font(.callout)
-                .controlSize(.small)
+                .padding(12)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
     }
 
     private var summary: String {
@@ -170,14 +234,17 @@ struct PlaylistView: View {
             HStack(spacing: 4) {
                 Image(systemName: "speaker.wave.2.fill").foregroundStyle(Color.accentColor)
                 Text("正在使用第 \(model.playingIndex + 1) 个")
-                if let next = model.nextSwitch {
+                if model.isPaused {
+                    Text("· 已暂停")
+                } else if let next = model.nextSwitch {
                     let minutes = max(0, Int(ceil(next.timeIntervalSince(context.date) / 60)))
                     Text("· \(minutes) 分钟后切换")
                 } else if list.wrappedValue.repeatOne {
                     Text("· 单个循环中")
                 }
             }
-            .font(.callout)
+            .font(.caption)
+            .lineLimit(1)
         }
     }
 
@@ -188,8 +255,10 @@ struct PlaylistView: View {
             ForEach(list.items) { $item in
                 PlaylistRow(
                     item: $item,
+                    engine: engine,
                     number: (list.wrappedValue.items.firstIndex { $0.id == item.id } ?? 0) + 1,
                     isPlaying: model.isPlaying(listID: listID, itemID: item.id),
+                    inTrash: model.isInTrash(item.url),
                     onPlay: { model.playItem(listID: listID, itemID: item.id) },
                     onPreview: { preview = PreviewTarget(url: item.url) },
                     onRemove: { model.removeItem(item.id, from: listID) },
@@ -202,6 +271,7 @@ struct PlaylistView: View {
             }
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollIndicators(.hidden)
     }
 
     private func grid(width: CGFloat) -> some View {
@@ -212,27 +282,118 @@ struct PlaylistView: View {
                     WallpaperCard(
                         url: item.url,
                         isCurrent: model.isPlaying(listID: listID, itemID: item.id),
-                        caption: "#\(offset + 1) · \(formatMinutes(item.seconds))",
+                        caption: model.isInTrash(item.url) ? "在垃圾桶中" : "#\(offset + 1) · \(formatMinutes(item.seconds))",
                         onUse: { model.playItem(listID: listID, itemID: item.id) },
                         onPreview: { preview = PreviewTarget(url: item.url) }
                     ) {
                         Button("从这里开始播放") { model.playItem(listID: listID, itemID: item.id) }
                         Button("大图预览") { preview = PreviewTarget(url: item.url) }
+                        WallpaperScalingMenu(engine: engine, url: item.url)
                         Button("在 Finder 中显示") { model.revealInFinder(item.url) }
                         Divider()
                         Button("从播放列表移除") { model.removeItem(item.id, from: listID) }
                     }
                 }
             }
-            .padding(18)
+            .padding(14)
         }
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct PlaylistWallpaperPicker: View {
+    @ObservedObject var model: LibraryModel
+    let listID: UUID
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected: Set<URL> = []
+    @State private var query = ""
+
+    var body: some View {
+        let alreadyAdded = Set(model.list(listID)?.items.map(\.path) ?? [])
+        let shown = model.files.filter {
+            query.isEmpty || title($0).localizedCaseInsensitiveContains(query)
+        }
+        let toAdd = model.files.filter { selected.contains($0) && !alreadyAdded.contains($0.path) }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("添加壁纸").font(.title2.bold())
+            TextField("搜索壁纸", text: $query)
+                .textFieldStyle(.roundedBorder)
+
+            if shown.isEmpty {
+                Text(query.isEmpty ? "壁纸库中没有可选壁纸。" : "没有找到匹配的壁纸。")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 14) {
+                        ForEach(shown, id: \.self) { url in
+                            tile(url, alreadyAdded: alreadyAdded.contains(url.path))
+                        }
+                    }
+                    .padding(3)
+                    .padding(.trailing, 14)
+                }
+            }
+
+            HStack {
+                Text("已选择 \(toAdd.count) 张").foregroundStyle(.secondary)
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("加入播放列表") {
+                    model.add(toAdd, to: listID)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(toAdd.isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 620, height: 480)
+    }
+
+    private func title(_ url: URL) -> String {
+        WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent
+    }
+
+    private func tile(_ url: URL, alreadyAdded: Bool) -> some View {
+        let checked = selected.contains(url)
+        return Button {
+            if checked { selected.remove(url) } else { selected.insert(url) }
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                MediaThumbnail(url: url, cornerRadius: 7)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .overlay(alignment: .topTrailing) {
+                        Image(systemName: alreadyAdded || checked ? "checkmark.circle.fill" : "circle")
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, checked ? Color.accentColor : .black.opacity(0.65))
+                            .padding(6)
+                            .accessibilityHidden(true)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(checked ? Color.accentColor : .clear, lineWidth: 2)
+                    }
+                Text(title(url)).lineLimit(1).truncationMode(.middle)
+                if alreadyAdded {
+                    Text("已在播放列表中").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(alreadyAdded)
+        .accessibilityLabel(title(url))
+        .accessibilityValue(alreadyAdded ? "已添加" : checked ? "已选择" : "未选择")
     }
 }
 
 struct PlaylistRow: View {
     @Binding var item: PlaylistItem
+    let engine: WallpaperEngine
     let number: Int
     let isPlaying: Bool
+    let inTrash: Bool
     let onPlay: () -> Void
     let onPreview: () -> Void
     let onRemove: () -> Void
@@ -268,11 +429,14 @@ struct PlaylistRow: View {
                 }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.url.deletingPathExtension().lastPathComponent)
+                Text(WorkshopScene(item.url)?.title ?? item.url.deletingPathExtension().lastPathComponent)
                     .fontWeight(isPlaying ? .semibold : .regular)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if exists {
+                if inTrash {
+                    Label("在垃圾桶中", systemImage: "trash")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if exists {
                     Text(item.url.deletingLastPathComponent().lastPathComponent)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -306,6 +470,7 @@ struct PlaylistRow: View {
         .contextMenu {
             Button("从这里开始播放", action: onPlay)
             Button("大图预览", action: onPreview)
+            WallpaperScalingMenu(engine: engine, url: item.url)
             Button("在 Finder 中显示", action: onReveal)
             Divider()
             Button("从播放列表移除", action: onRemove)

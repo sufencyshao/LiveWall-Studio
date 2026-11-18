@@ -44,7 +44,7 @@ struct WallpaperCard<Menu: View>: View {
                 .animation(.easeOut(duration: 0.15), value: hovering)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(url.deletingPathExtension().lastPathComponent)
+                Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
                     .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -105,27 +105,46 @@ struct AddToPlaylistMenu: View {
 /// Everything in the wallpaper folder, as a grid of previews.
 struct LibraryView: View {
     @ObservedObject var model: LibraryModel
+    let engine: WallpaperEngine
     var openPlaylist: (UUID) -> Void = { _ in }
 
     @AppStorage("LiveWallGridSize") private var tileWidth: Double = 220
+    @AppStorage("LiveWallLibrarySort") private var sort: Sort = .nameAscending
     @State private var query = ""
     @State private var filter: Filter = .all
     @State private var preview: PreviewTarget?
+    @State private var dropTargeted = false
+
+    enum Sort: String, CaseIterable, Identifiable {
+        case nameAscending = "名称（升序）"
+        case nameDescending = "名称（降序）"
+        case newestFirst = "修改时间（最新在前）"
+        case oldestFirst = "修改时间（最早在前）"
+        var id: String { rawValue }
+    }
 
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "全部", video = "视频", image = "图片"
+        case all = "全部", video = "视频", image = "图片", scene = "场景"
         var id: String { rawValue }
     }
 
     private var shown: [URL] {
-        model.files.filter { url in
+        let sorted: [URL]
+        switch sort {
+        case .nameAscending: sorted = model.files
+        case .nameDescending: sorted = Array(model.files.reversed())
+        case .newestFirst: sorted = model.filesByModificationDate(newestFirst: true)
+        case .oldestFirst: sorted = model.filesByModificationDate(newestFirst: false)
+        }
+        return sorted.filter { url in
             let kind = MediaKind(url: url)
             switch filter {
             case .all: break
             case .video: if kind?.isVideo != true { return false }
-            case .image: if kind?.isVideo != false { return false }
+            case .image: if kind != .image && kind != .animatedImage { return false }
+            case .scene: if kind != .scene { return false }
             }
-            return query.isEmpty || url.lastPathComponent.localizedCaseInsensitiveContains(query)
+            return query.isEmpty || (WorkshopScene(url)?.title ?? url.lastPathComponent).localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -134,18 +153,27 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if model.data.folder.isEmpty {
-                EmptyStateView(
-                    symbol: "folder.badge.plus",
-                    title: "选择一个壁纸文件夹",
-                    detail: "LiveWall 会读取文件夹里的视频（mp4、mov、m4v）和图片（jpg、png、heic、gif…），并生成预览。",
-                    button: "选择文件夹…"
-                ) { model.chooseFolder() }
+            if !model.folderAvailable {
+                VStack(spacing: 12) {
+                    Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundStyle(.secondary)
+                    Text(model.data.folder.isEmpty ? "请选择壁纸文件夹" : "找不到壁纸文件夹")
+                        .font(.headline)
+                    if !model.data.folder.isEmpty {
+                        Text(model.data.folder).font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    HStack {
+                        Button("选择已有文件夹…") { model.chooseFolder() }
+                        Button("创建文件夹…") { model.createFolder() }
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.files.isEmpty {
                 EmptyStateView(
                     symbol: "photo.on.rectangle.angled",
                     title: "文件夹里没有可用的壁纸",
-                    detail: model.data.folder,
+                    detail: "将图片、视频或完整的场景项目拖到这里，即可复制到壁纸文件夹。",
                     button: "换一个文件夹…"
                 ) { model.chooseFolder() }
             } else {
@@ -164,10 +192,11 @@ struct LibraryView: View {
                             ) {
                                 Button("设为壁纸") { model.use(url) }
                                 Button("大图预览") { preview = PreviewTarget(url: url) }
+                                WallpaperScalingMenu(engine: engine, url: url)
                                 AddToPlaylistMenu(model: model, urls: [url], onCreated: openPlaylist)
                                 Divider()
                                 Button("在 Finder 中显示") { model.revealInFinder(url) }
-                                Button("从壁纸库移除") { model.hide(url) }
+                                Button("移入垃圾桶", role: .destructive) { model.moveToTrash(url) }
                             }
                             .draggable(url)
                         }
@@ -179,9 +208,20 @@ struct LibraryView: View {
         .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
         .clipped()
         }
-        .overlay(alignment: .bottom) { Toast(text: model.message) }
+        .overlay {
+            if dropTargeted && model.folderAvailable {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [7, 4]))
+                    .padding(6)
+                    .allowsHitTesting(false)
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            model.importDroppedFiles(urls)
+        } isTargeted: { dropTargeted = $0 }
+        .overlay(alignment: .bottom) { Toast(text: model.importingPackage ? "正在导入壁纸…" : model.message) }
         .sheet(item: $preview) { target in
-            WallpaperPreviewSheet(url: target.url) { model.use(target.url) }
+            WallpaperPreviewSheet(engine: engine, url: target.url) { model.use(target.url) }
         }
         .onAppear { model.refresh() }
     }
@@ -208,7 +248,7 @@ struct LibraryView: View {
             ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
         }
         .pickerStyle(.segmented).labelsHidden()
-        .frame(width: 150)
+        .frame(width: 190)
     }
 
     private var search: some View {
@@ -224,16 +264,43 @@ struct LibraryView: View {
     private var folderMenu: some View {
         Menu {
             Button("选择文件夹…") { model.chooseFolder() }
-            Button("刷新") { model.refresh() }
+            Button("创建文件夹…") { model.createFolder() }
+            Button("导入 PKG 壁纸…") { model.choosePackage() }
+                .disabled(model.importingPackage)
             if !model.data.hiddenPaths.isEmpty {
                 Button("恢复已移除的 \(model.data.hiddenPaths.count) 个壁纸") { model.restoreHidden() }
             }
-            if !model.data.folder.isEmpty {
+            if model.folderAvailable {
                 Divider()
                 Button("在 Finder 中打开") { NSWorkspace.shared.open(URL(fileURLWithPath: model.data.folder)) }
             }
         } label: { Image(systemName: "folder") }
         .menuStyle(.borderlessButton).fixedSize().help("壁纸文件夹")
+    }
+
+    private var libraryActions: some View {
+        HStack(spacing: 8) {
+            Button { model.refresh(report: true) } label: {
+                Label("刷新壁纸库", systemImage: "arrow.clockwise")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("重新扫描壁纸文件夹")
+            .keyboardShortcut("r", modifiers: .command)
+
+            Menu {
+                Picker("排序", selection: $sort) {
+                    ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.inline)
+            } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
+            .labelStyle(.iconOnly)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("按名称或修改时间排序")
+
+            folderMenu
+        }
+        .fixedSize()
     }
 
     private var header: some View {
@@ -243,10 +310,10 @@ struct LibraryView: View {
                 typeFilter
                 search.frame(width: 130)
                 sizeSlider
-                folderMenu
+                libraryActions
             }
             VStack(alignment: .leading, spacing: 10) {
-                HStack { heading; sizeSlider; folderMenu }
+                HStack { heading; sizeSlider; libraryActions }
                 HStack(spacing: 10) { typeFilter; search }
             }
         }

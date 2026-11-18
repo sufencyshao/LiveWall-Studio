@@ -9,9 +9,11 @@ final class StatusItemController: NSObject, NSWindowDelegate {
     private let statusItem: NSStatusItem
     private let window: NSWindow
     private let library: LibraryModel
+    private let engine: WallpaperEngine
 
     init(engine: WallpaperEngine, library: LibraryModel) {
         self.library = library
+        self.engine = engine
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         let host = NSHostingController(rootView: SettingsView(engine: engine, library: library))
@@ -75,6 +77,14 @@ final class StatusItemController: NSObject, NSWindowDelegate {
     }
 
     @objc func showWindow() {
+        if ProcessInfo.processInfo.arguments.contains("--compact-layout-test") {
+            window.setContentSize(NSSize(width: 380, height: 420))
+            window.center()
+        }
+        if ProcessInfo.processInfo.arguments.contains("--sidebar-layout-test") {
+            window.setContentSize(NSSize(width: 640, height: 500))
+            window.center()
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -83,15 +93,31 @@ final class StatusItemController: NSObject, NSWindowDelegate {
     private func showQuickMenu() {
         let menu = NSMenu()
         menu.addItem(withTitle: "打开 LiveWall", action: #selector(showWindow), keyEquivalent: "").target = self
-        if library.data.active != nil {
+        if library.canSwitchWallpaper || engine.displayStates.contains(where: { $0.videoURL != nil }) {
             menu.addItem(.separator())
-            menu.addItem(withTitle: "下一个壁纸", action: #selector(nextWallpaper), keyEquivalent: "").target = self
-            menu.addItem(withTitle: "停止轮换", action: #selector(stopRotation), keyEquivalent: "").target = self
-        } else if !library.data.lists.isEmpty {
+            if library.canSwitchWallpaper {
+                menu.addItem(withTitle: "上一个壁纸", action: #selector(previousWallpaper), keyEquivalent: "").target = self
+                menu.addItem(withTitle: "下一个壁纸", action: #selector(nextWallpaper), keyEquivalent: "").target = self
+                menu.addItem(withTitle: "随机一个", action: #selector(randomWallpaper), keyEquivalent: "").target = self
+            }
+            if engine.displayStates.contains(where: { $0.videoURL != nil }) {
+                menu.addItem(withTitle: library.isPaused ? "继续播放" : "暂停播放",
+                             action: #selector(togglePause), keyEquivalent: "").target = self
+            }
+            if let muted = engine.wallpaperAudioMuted {
+                menu.addItem(withTitle: muted ? "取消静音" : "静音",
+                             action: #selector(toggleMute), keyEquivalent: "").target = self
+            }
+            if library.data.active != nil {
+                menu.addItem(withTitle: "停止轮换", action: #selector(stopRotation), keyEquivalent: "").target = self
+            }
+        }
+        let availableLists = library.data.lists.filter { !$0.items.isEmpty }
+        if !availableLists.isEmpty {
             menu.addItem(.separator())
             let playItem = NSMenuItem(title: "播放列表", action: nil, keyEquivalent: "")
             let sub = NSMenu()
-            for list in library.data.lists where !list.items.isEmpty {
+            for list in availableLists {
                 let item = NSMenuItem(title: list.name, action: #selector(startList(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = list.id
@@ -109,6 +135,10 @@ final class StatusItemController: NSObject, NSWindowDelegate {
     }
 
     @objc private func nextWallpaper() { library.next() }
+    @objc private func previousWallpaper() { library.previous() }
+    @objc private func randomWallpaper() { library.switchWallpaper(.random) }
+    @objc private func togglePause() { library.togglePause() }
+    @objc private func toggleMute() { engine.toggleWallpaperMute() }
     @objc private func stopRotation() { library.stop() }
     @objc private func startList(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? UUID { library.start(id) }

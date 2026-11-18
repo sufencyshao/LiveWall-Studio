@@ -7,34 +7,15 @@ import SwiftUI
 /// A muted, looping video preview. Only ever alive while it's on screen
 /// and hovered (or in the preview sheet), so it doesn't cost anything for
 /// the rest of the library.
-final class PreviewPlayerView: NSView {
-    private let playerLayer = AVPlayerLayer()
+final class PreviewPlayerView: PlayerView {
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private(set) var url: URL?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        playerLayer.videoGravity = .resizeAspectFill
-        wantsLayer = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func makeBackingLayer() -> CALayer { playerLayer }
 
     /// Purely visual: let clicks and hover fall through to the SwiftUI
     /// card underneath, otherwise the card loses its hover state the
     /// moment the preview appears.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    var gravity: AVLayerVideoGravity {
-        get { playerLayer.videoGravity }
-        set { playerLayer.videoGravity = newValue }
-    }
 
     func load(_ url: URL, muted: Bool = true) {
         stop()
@@ -46,7 +27,7 @@ final class PreviewPlayerView: NSView {
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
         looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
         player = queuePlayer
-        playerLayer.player = queuePlayer
+        display(queuePlayer)
         queuePlayer.play()
     }
 
@@ -58,7 +39,7 @@ final class PreviewPlayerView: NSView {
         player?.pause()
         looper?.disableLooping()
         looper = nil
-        playerLayer.player = nil
+        display(nil)
         player = nil
         url = nil
     }
@@ -68,16 +49,19 @@ struct LiveVideoPreview: NSViewRepresentable {
     let url: URL
     var gravity: AVLayerVideoGravity = .resizeAspectFill
     var muted = true
+    var fillPosition: FillPosition = .center
 
     func makeNSView(context: Context) -> PreviewPlayerView {
         let view = PreviewPlayerView(frame: .zero)
         view.gravity = gravity
+        view.fillPosition = fillPosition
         view.load(url, muted: muted)
         return view
     }
 
     func updateNSView(_ view: PreviewPlayerView, context: Context) {
         view.gravity = gravity
+        view.fillPosition = fillPosition
         if view.url != url { view.load(url, muted: muted) }
         view.setMuted(muted)
     }
@@ -202,6 +186,9 @@ struct KindBadge: View {
                 Text(duration.map(formatDuration) ?? "视频")
             case .animatedImage:
                 Text("GIF")
+            case .scene:
+                Image(systemName: "sparkles")
+                Text("场景")
             case .image:
                 Image(systemName: "photo")
                 Text("图片")
@@ -254,34 +241,154 @@ struct PreviewTarget: Identifiable {
     var id: String { url.path }
 }
 
+struct WallpaperScalingPicker: View {
+    @ObservedObject var engine: WallpaperEngine
+    let url: URL?
+
+    var body: some View {
+        Picker("缩放方式", selection: Binding(
+            get: { url.map { engine.scaling(for: $0) } ?? .fill },
+            set: { mode in
+                if let url { engine.setScaling(mode, for: url) }
+            }
+        )) {
+            ForEach(ScalingMode.allCases) { mode in
+                Text(mode.label).tag(mode)
+            }
+        }
+        .disabled(url == nil)
+    }
+}
+
+struct WallpaperScalingMenu: View {
+    let engine: WallpaperEngine
+    let url: URL
+
+    var body: some View {
+        Menu("缩放方式") {
+            WallpaperScalingPicker(engine: engine, url: url)
+                .pickerStyle(.inline)
+        }
+    }
+}
+
+private struct FramedImagePreview: NSViewRepresentable {
+    let url: URL?
+    let animated: Bool
+    let scaling: ScalingMode
+    let position: FillPosition
+
+    func makeNSView(context: Context) -> ImageWallpaperView {
+        let image = url.flatMap { NSImage(contentsOf: $0) } ?? NSImage(size: NSSize(width: 1, height: 1))
+        let view = ImageWallpaperView(frame: .zero, image: image, animated: animated, scaling: scaling)
+        view.fillPosition = position
+        return view
+    }
+
+    func updateNSView(_ view: ImageWallpaperView, context: Context) {
+        view.apply(scaling)
+        view.fillPosition = position
+    }
+}
+
+private struct LiveScenePreview: NSViewRepresentable {
+    let scene: WorkshopScene
+    let size: CGSize
+    let scaling: ScalingMode
+    let position: FillPosition
+    let onReady: () -> Void
+    let onFailure: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView(frame: CGRect(origin: .zero, size: size))
+        guard let screen = NSScreen.main ?? NSScreen.screens.first,
+              let sceneView = SceneWallpaperView(scene: scene, screen: screen, scaling: scaling,
+                                                  position: position, muted: true, volume: 0,
+                                                  previewSize: size, onReady: onReady,
+                                                  onLoadFailure: onFailure) else {
+            DispatchQueue.main.async(execute: onFailure)
+            return container
+        }
+        container.addSubview(sceneView)
+        return container
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard let sceneView = view.subviews.first as? SceneWallpaperView else { return }
+        sceneView.setScaling(scaling)
+        sceneView.setFillPosition(scaling == .fill ? position : .center)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: ()) {
+        view.subviews.first?.removeFromSuperview()
+    }
+}
+
 struct WallpaperPreviewSheet: View {
+    @ObservedObject var engine: WallpaperEngine
     let url: URL
     let onUse: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var muted = true
     @State private var info = ""
+    @State private var sceneReady = false
+    @State private var sceneFailed = false
+
+    private var previewSize: CGSize {
+        let screen = NSScreen.main
+        let ratio = screen.map { $0.frame.width / $0.frame.height } ?? (16.0 / 9.0)
+        let maxWidth = min(728, (screen?.visibleFrame.width ?? 800) - 64)
+        let maxHeight = min(420, (screen?.visibleFrame.height ?? 800) * 0.54)
+        let width = min(maxWidth, maxHeight * ratio).rounded(.down)
+        return CGSize(width: width, height: (width / ratio).rounded())
+    }
 
     var body: some View {
+        let scaling = engine.scaling(for: url)
+        let position = engine.fillPosition(for: url)
+        let scene = WorkshopScene(url)
+        let size = previewSize
         VStack(alignment: .leading, spacing: 12) {
             Color.black
-                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(width: size.width, height: size.height)
                 .overlay {
-                    switch MediaKind(url: url) {
-                    case .video:
-                        LiveVideoPreview(url: url, gravity: .resizeAspect, muted: muted)
-                    case .animatedImage:
-                        AnimatedImagePreview(url: url)
-                    default:
-                        if let image = NSImage(contentsOf: url) {
-                            Image(nsImage: image).resizable().scaledToFit()
+                    if let scene {
+                        LiveScenePreview(scene: scene, size: size, scaling: scaling, position: position,
+                                         onReady: { sceneReady = true }, onFailure: { sceneFailed = true })
+                        if sceneFailed {
+                            Label(scene.hasAssets ? "无法载入场景预览" : "缺少 Wallpaper Engine 的 assets 文件夹",
+                                  systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.white)
+                        } else if !sceneReady {
+                            ProgressView("正在渲染场景…")
+                                .foregroundStyle(.white)
+                                .colorScheme(.dark)
                         }
+                    } else if MediaKind(url: url)?.isVideo == true {
+                        LiveVideoPreview(url: url, gravity: scaling.videoGravity, muted: muted, fillPosition: position)
+                    } else {
+                        FramedImagePreview(url: url, animated: MediaKind(url: url) == .animatedImage,
+                                           scaling: scaling, position: position)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+            if scaling == .fill {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("填充取景").font(.headline)
+                        Spacer()
+                        Button("恢复居中") { engine.setFillPosition(.center, for: url) }
+                            .disabled(position == .center)
+                    }
+                    positionSlider("水平", start: "左", end: "右", axis: \.x)
+                    positionSlider("垂直", start: "上", end: "下", axis: \.y)
+                }
+            }
+
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(url.deletingPathExtension().lastPathComponent)
+                    Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
                         .font(.headline)
                         .lineLimit(1)
                     Text(info)
@@ -289,6 +396,7 @@ struct WallpaperPreviewSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                WallpaperScalingPicker(engine: engine, url: url).fixedSize()
                 if MediaKind(url: url)?.isVideo == true {
                     Button {
                         muted.toggle()
@@ -307,8 +415,26 @@ struct WallpaperPreviewSheet: View {
             }
         }
         .padding(16)
-        .frame(width: 760)
-        .task(id: url) { info = await Self.describe(url) }
+        .frame(width: max(440, size.width) + 32)
+        .task(id: url) { info = scene == nil ? await Self.describe(url) : "场景壁纸" }
+    }
+
+    private func positionSlider(_ title: String, start: String, end: String,
+                                axis: WritableKeyPath<FillPosition, Double>) -> some View {
+        HStack(spacing: 10) {
+            Text(start).foregroundStyle(.secondary)
+            Slider(value: Binding(
+                get: { engine.fillPosition(for: url)[keyPath: axis] },
+                set: { value in
+                    var position = engine.fillPosition(for: url)
+                    position[keyPath: axis] = value
+                    engine.setFillPosition(position, for: url)
+                }
+            ), in: 0...1) { Text(title) }
+                .labelsHidden()
+                .accessibilityLabel(title + "取景位置")
+            Text(end).foregroundStyle(.secondary)
+        }
     }
 
     private static func describe(_ url: URL) async -> String {
