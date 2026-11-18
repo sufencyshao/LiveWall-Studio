@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build an Apple-silicon LiveWall Studio disk image from the release sources."""
+import argparse
 import os
 import platform
 import plistlib
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 RENDERER = DIST / "renderer"
 VERSION = (ROOT / "VERSION").read_text().strip()
-BUILD = "130"
+BUILD = "131"
 MINIMUM_MACOS = "15.0"
 LIBRARIES = {
     "quickjs-ng": ["libqjs.0.dylib"],
@@ -69,7 +70,7 @@ def copy_notice(notice, target):
         shutil.copy2(notice, target)
 
 
-def make_app(stage):
+def make_app(stage, scene_assets=None):
     app = stage / "LiveWall.app"
     contents = app / "Contents"
     macos = contents / "MacOS"
@@ -130,6 +131,8 @@ def make_app(stage):
         for name in names:
             shutil.copy2(RENDERER / "runtime" / vendor / "lib" / name, frameworks)
     link_and_sign(frameworks)
+    if scene_assets is not None:
+        shutil.copytree(scene_assets, resources / "SceneAssets", ignore=shutil.ignore_patterns(".DS_Store"))
     run("codesign", "--force", "--sign", "-", saver)
     run("codesign", "--force", "--sign", "-", app)
     run("codesign", "--verify", "--deep", "--strict", app)
@@ -137,22 +140,31 @@ def make_app(stage):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--personal-assets", type=Path,
+                        help="Bundle a local Wallpaper Engine assets folder in a personal-use disk image.")
+    args = parser.parse_args()
+    assets = args.personal_assets
+    if assets is not None and not (assets / "shaders/genericimage2.frag").is_file():
+        parser.error("--personal-assets must point to a complete Wallpaper Engine assets folder.")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("Run the package build on an Apple-silicon Mac.")
     if not (RENDERER / "engine/libLiveWallScene.dylib").is_file():
         raise SystemExit("Build the native renderer with script/build-renderer.sh first.")
-    DIST.mkdir(exist_ok=True)
+    output_directory = DIST if assets is None else DIST / "personal"
+    output_directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="livewall-package-") as temporary:
         stage = Path(temporary) / "disk"
         stage.mkdir()
-        app = make_app(stage)
+        app = make_app(stage, assets)
         (stage / "Applications").symlink_to("/Applications", target_is_directory=True)
-        filename = f"LiveWall-Studio-{VERSION}-macOS-arm64.dmg"
+        suffix = "" if assets is None else "-personal"
+        filename = f"LiveWall-Studio-{VERSION}-macOS-arm64{suffix}.dmg"
         image = Path(temporary) / filename
         run("hdiutil", "create", "-quiet", "-fs", "HFS+", "-format", "UDZO",
             "-volname", f"LiveWall Studio {VERSION}", "-srcfolder", stage, image)
         run("hdiutil", "verify", image)
-        output = DIST / filename
+        output = output_directory / filename
         shutil.move(image, output)
         print(output)
 

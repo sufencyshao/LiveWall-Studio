@@ -1,4 +1,5 @@
 // Local LiveWall prototype bridge. SPDX-License-Identifier: GPL-3.0-only
+#import <QuartzCore/CAMetalLayer.h>
 #include "Platform/Apple/SceneWallpaperBindings.h"
 
 extern "C" owe_scene_wallpaper* lw_scene_open(
@@ -6,6 +7,9 @@ extern "C" owe_scene_wallpaper* lw_scene_open(
     const char* project, const char* assets, const char* cache, float volume, bool muted,
     int32_t scaling
 ) {
+    CAMetalLayer* surface = (__bridge CAMetalLayer*)layer;
+    surface.maximumDrawableCount = 2;
+    owe_set_scene_on_demand_enabled(true);
     owe_scene_wallpaper* scene = nullptr;
     if (owe_scene_wallpaper_new(&scene) != 0) return nullptr;
     if (owe_scene_wallpaper_init(scene) != 0 ||
@@ -39,7 +43,11 @@ extern "C" int32_t lw_scene_observe_audio(owe_scene_wallpaper* scene,
 
 extern "C" void lw_scene_audio_reactive(owe_scene_wallpaper* scene, bool enabled) {
     owe_scene_wallpaper_set_property_bool(scene, owe_property_audio_response_enabled(), enabled);
-    owe_scene_wallpaper_set_target_fps(scene, enabled ? 60 : 30);
+}
+
+extern "C" void lw_scene_render_budget(owe_scene_wallpaper* scene, uint32_t fps, double scale) {
+    owe_scene_wallpaper_set_target_fps(scene, fps);
+    if (scale > 0) owe_scene_wallpaper_set_render_scale(scene, scale);
 }
 
 extern "C" void lw_scene_scaling(owe_scene_wallpaper* scene, int32_t scaling) {

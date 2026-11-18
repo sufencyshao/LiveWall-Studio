@@ -58,6 +58,7 @@ private final class WorkshopRenderer {
     typealias DropContext = @convention(c) (UnsafeMutableRawPointer?) -> Void
     typealias ObserveAudio = @convention(c) (OpaquePointer, AudioDemand, UnsafeMutableRawPointer, DropContext) -> Int32
     typealias ReactiveAudio = @convention(c) (OpaquePointer, Bool) -> Void
+    typealias RenderBudget = @convention(c) (OpaquePointer, UInt32, Double) -> Void
     typealias StartCapture = @convention(c) (UnsafeMutablePointer<Int32>) -> OpaquePointer?
     typealias StopCapture = @convention(c) (OpaquePointer) -> Void
     let open: Open
@@ -70,6 +71,7 @@ private final class WorkshopRenderer {
     let frames: Frames
     let observeAudio: ObserveAudio
     let reactiveAudio: ReactiveAudio
+    let renderBudget: RenderBudget
     let startCapture: StartCapture
     let stopCapture: StopCapture
     static let shared: WorkshopRenderer? = WorkshopRenderer()
@@ -87,6 +89,7 @@ private final class WorkshopRenderer {
               let frames = dlsym(library, "lw_scene_frames"),
               let observeAudio = dlsym(library, "lw_scene_observe_audio"),
               let reactiveAudio = dlsym(library, "lw_scene_audio_reactive"),
+              let renderBudget = dlsym(library, "lw_scene_render_budget"),
               let startCapture = dlsym(library, "lw_system_audio_start"),
               let stopCapture = dlsym(library, "lw_system_audio_stop")
         else { dlclose(library); return nil }
@@ -101,6 +104,7 @@ private final class WorkshopRenderer {
         self.frames = unsafeBitCast(frames, to: Frames.self)
         self.observeAudio = unsafeBitCast(observeAudio, to: ObserveAudio.self)
         self.reactiveAudio = unsafeBitCast(reactiveAudio, to: ReactiveAudio.self)
+        self.renderBudget = unsafeBitCast(renderBudget, to: RenderBudget.self)
         self.startCapture = unsafeBitCast(startCapture, to: StartCapture.self)
         self.stopCapture = unsafeBitCast(stopCapture, to: StopCapture.self)
     }
@@ -172,8 +176,18 @@ final class SceneWallpaperView: NSView {
     private let renderer: WorkshopRenderer
     private var handle: OpaquePointer?
     private var pointerTimer: Timer?
+    private var lastPointer: CGPoint?
+    private var lastPointerMovement = ProcessInfo.processInfo.systemUptime
     private var readinessTimer: Timer?
-    private var paused = false
+    private var readinessDeadline = ProcessInfo.processInfo.systemUptime + 25
+    private var pausedAt: TimeInterval?
+    private var saveEnergy = false
+    private var audioReactive = false
+    private var frameRate = 0
+    private var renderScale: Double = 1
+    private var appliedScaling: ScalingMode
+    private var appliedFillPosition = FillPosition.center
+    private let isPreview: Bool
     private let audioID = UUID()
     private var needsAudio = false
     private var audioPreference: AnyCancellable?
@@ -183,12 +197,16 @@ final class SceneWallpaperView: NSView {
     static var rendererAvailable: Bool { WorkshopRenderer.shared != nil }
 
     init?(scene: WorkshopScene, screen: NSScreen, scaling: ScalingMode, position: FillPosition,
-          muted: Bool, volume: Float, previewSize: CGSize? = nil,
+          muted: Bool, volume: Float, frameRate: Int = 0, saveEnergy: Bool = false, previewSize: CGSize? = nil,
           onReady: (() -> Void)? = nil, onLoadFailure: @escaping () -> Void) {
         guard scene.hasAssets, let renderer = WorkshopRenderer.shared else { return nil }
         self.renderer = renderer
         self.muted = muted
         self.volume = volume
+        self.isPreview = previewSize != nil
+        self.frameRate = frameRate
+        self.saveEnergy = saveEnergy
+        self.appliedScaling = scaling
         let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LiveWall/Workshop", isDirectory: true)
         try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
@@ -204,6 +222,7 @@ final class SceneWallpaperView: NSView {
                                screen.backingScaleFactor, display, scene.project.path,
                                scene.assets.path, cache.path, volume, muted, scaling.workshopValue)
         guard let handle else { return nil }
+        updateRenderBudget()
         setFillPosition(scaling == .fill ? position : .center)
         let context = Unmanaged.passRetained(SceneAudioObserver(self))
         let result = renderer.observeAudio(handle, { opaque, needed in
@@ -215,32 +234,27 @@ final class SceneWallpaperView: NSView {
         })
         if result != 0 { context.release() }
         audioPreference = WorkshopAudioCapture.shared.$enabled.sink { [weak self] enabled in
-            guard let self, let handle = self.handle else { return }
-            self.renderer.reactiveAudio(handle, enabled && self.needsAudio)
+            guard let self else { return }
+            self.setAudioReactive(enabled && self.needsAudio)
         }
-        let deadline = ProcessInfo.processInfo.systemUptime + 25
         readinessTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
             guard let self, let handle = self.handle else { timer.invalidate(); return }
             if self.renderer.frames(handle) > 0 {
                 timer.invalidate()
+                self.readinessTimer = nil
                 if let onReady {
                     onReady()
                 } else {
                     NSLog("LiveWall scene ready: %@", scene.project.deletingLastPathComponent().lastPathComponent)
                 }
-            } else if ProcessInfo.processInfo.systemUptime >= deadline, !self.paused {
+            } else if ProcessInfo.processInfo.systemUptime >= self.readinessDeadline {
                 timer.invalidate()
+                self.readinessTimer = nil
                 onLoadFailure()
             }
         }
-        pointerTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            guard let self, !self.paused, let handle = self.handle, let window = self.window else { return }
-            let area = self.bounds
-            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            guard area.contains(point) else { return }
-            let y = self.isFlipped ? point.y - area.minY : area.maxY - point.y
-            self.renderer.pointer(handle, (point.x - area.minX) / area.width, y / area.height)
-        }
+        readinessTimer?.tolerance = 0.1
+        startPointerTimer()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -254,30 +268,100 @@ final class SceneWallpaperView: NSView {
     }
 
     func setPaused(_ paused: Bool) {
-        guard self.paused != paused else { return }
-        self.paused = paused
+        guard (pausedAt != nil) != paused else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if paused {
+            pausedAt = now
+            readinessTimer?.fireDate = .distantFuture
+            pointerTimer?.invalidate()
+            pointerTimer = nil
+            lastPointer = nil
+        } else if let pausedAt {
+            self.pausedAt = nil
+            readinessDeadline += now - pausedAt
+            readinessTimer?.fireDate = Date().addingTimeInterval(0.5)
+            startPointerTimer()
+        }
         if let handle { renderer.pause(handle, paused) }
         updateAudioDemand()
+    }
+
+    private func startPointerTimer(idle: Bool = false) {
+        let interval = 1.0 / (idle ? 8 : (saveEnergy ? 20 : 30))
+        pointerTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self, let handle = self.handle, let window = self.window else { return }
+            let area = self.bounds
+            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            let now = ProcessInfo.processInfo.systemUptime
+            if area.contains(point) {
+                let y = self.isFlipped ? point.y - area.minY : area.maxY - point.y
+                let normalized = CGPoint(x: (point.x - area.minX) / area.width, y: y / area.height)
+                if normalized != self.lastPointer {
+                    self.lastPointer = normalized
+                    self.lastPointerMovement = now
+                    self.renderer.pointer(handle, normalized.x, normalized.y)
+                }
+            }
+            let shouldIdle = !area.contains(point) || now - self.lastPointerMovement > 0.5
+            guard shouldIdle != idle else { return }
+            self.pointerTimer?.invalidate()
+            self.startPointerTimer(idle: shouldIdle)
+        }
+        pointerTimer?.tolerance = interval / 5
+    }
+
+    func setEnergySaving(_ enabled: Bool) {
+        guard saveEnergy != enabled else { return }
+        saveEnergy = enabled
+        updateRenderBudget()
+        if pausedAt == nil {
+            pointerTimer?.invalidate()
+            startPointerTimer()
+        }
+    }
+
+    func setFrameRate(_ fps: Int) {
+        guard frameRate != fps else { return }
+        frameRate = fps
+        updateRenderBudget()
+    }
+
+    private func updateRenderBudget() {
+        guard let handle else { return }
+        let automatic = saveEnergy ? (audioReactive ? 30 : 24) : (audioReactive ? 60 : 30)
+        let fps = frameRate == 0 ? automatic : frameRate
+        let scale = isPreview ? 0.5 : (saveEnergy ? 0.75 : 1)
+        renderer.renderBudget(handle, UInt32(fps), scale == renderScale ? 0 : scale)
+        renderScale = scale
+    }
+
+    private func setAudioReactive(_ enabled: Bool) {
+        guard audioReactive != enabled, let handle else { return }
+        audioReactive = enabled
+        renderer.reactiveAudio(handle, enabled)
+        updateRenderBudget()
     }
 
     fileprivate func setAudioDemand(_ needed: Bool) {
         guard needsAudio != needed else { return }
         needsAudio = needed
-        if let handle {
-            renderer.reactiveAudio(handle, needed && WorkshopAudioCapture.shared.enabled)
-        }
+        setAudioReactive(needed && WorkshopAudioCapture.shared.enabled)
         updateAudioDemand()
     }
 
     private func updateAudioDemand() {
-        WorkshopAudioCapture.shared.setDemand(needsAudio && !paused, for: audioID)
+        WorkshopAudioCapture.shared.setDemand(needsAudio && pausedAt == nil, for: audioID)
     }
 
     func setScaling(_ scaling: ScalingMode) {
+        guard appliedScaling != scaling else { return }
+        appliedScaling = scaling
         if let handle { renderer.scaling(handle, scaling.workshopValue) }
     }
 
     func setFillPosition(_ position: FillPosition) {
+        guard appliedFillPosition != position else { return }
+        appliedFillPosition = position
         if let handle { renderer.framing(handle, position.x, position.y) }
     }
 

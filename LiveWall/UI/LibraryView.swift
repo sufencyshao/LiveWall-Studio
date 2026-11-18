@@ -193,6 +193,9 @@ struct LibraryView: View {
                                 Button("设为壁纸") { model.use(url) }
                                 Button("大图预览") { preview = PreviewTarget(url: url) }
                                 WallpaperScalingMenu(engine: engine, url: url)
+                                if WallpaperFrameRatePicker.supports(url) {
+                                    WallpaperFrameRatePicker(engine: engine, url: url)
+                                }
                                 AddToPlaylistMenu(model: model, urls: [url], onCreated: openPlaylist)
                                 Divider()
                                 Button("在 Finder 中显示") { model.revealInFinder(url) }

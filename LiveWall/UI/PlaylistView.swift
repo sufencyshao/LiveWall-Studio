@@ -289,6 +289,9 @@ struct PlaylistView: View {
                         Button("从这里开始播放") { model.playItem(listID: listID, itemID: item.id) }
                         Button("大图预览") { preview = PreviewTarget(url: item.url) }
                         WallpaperScalingMenu(engine: engine, url: item.url)
+                        if WallpaperFrameRatePicker.supports(item.url) {
+                            WallpaperFrameRatePicker(engine: engine, url: item.url)
+                        }
                         Button("在 Finder 中显示") { model.revealInFinder(item.url) }
                         Divider()
                         Button("从播放列表移除") { model.removeItem(item.id, from: listID) }
@@ -471,6 +474,9 @@ struct PlaylistRow: View {
             Button("从这里开始播放", action: onPlay)
             Button("大图预览", action: onPreview)
             WallpaperScalingMenu(engine: engine, url: item.url)
+            if WallpaperFrameRatePicker.supports(item.url) {
+                WallpaperFrameRatePicker(engine: engine, url: item.url)
+            }
             Button("在 Finder 中显示", action: onReveal)
             Divider()
             Button("从播放列表移除", action: onRemove)

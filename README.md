@@ -6,7 +6,7 @@
 
 ## 安装
 
-1. 在 GitHub Releases 下载 `LiveWall-Studio-1.3.0-macOS-arm64.dmg`。
+1. 在 GitHub Releases 下载最新的 `LiveWall-Studio-版本号-macOS-arm64.dmg`。
 2. 双击打开磁盘映像，将 `LiveWall.app` 拖到「应用程序」。升级时先从菜单栏退出旧版，再替换「应用程序」里的旧副本。
 3. 在「应用程序」中打开 LiveWall。菜单栏会出现 LiveWall 图标，左键打开主窗口，右键打开播放控制。
 
@@ -53,6 +53,7 @@ LiveWall/
 ## 播放和管理
 
 - **设为壁纸**：在「全部壁纸」双击卡片。点眼睛可预览，并为每张壁纸独立设置「填充」「适应」「拉伸」。填充模式下可移动取景位置，场景在预览窗口实时渲染。
+- **壁纸帧率**：场景与 GIF 可以在预览或右键菜单中单独选帧率。电池节能模式会降低场景渲染分辨率，并限制「自动」档的帧率。手动帧率优先。视频按原文件播放。
 - **播放列表**：创建列表后点「添加壁纸」，在带缩略图的窗口中多选。每一项支持自定时长，也可批量设置。顶部能切换上一张、下一张、随机一张，并可暂停、继续、随机轮换或单张循环。
 - **菜单栏**：右键 LiveWall 图标，可切换壁纸、暂停或继续、静音或取消静音。
 - **音频反应**：对带频谱的场景，在「偏好设置 → 场景音频」打开系统声音响应，按 macOS 提示授权。LiveWall 在本机实时分析音频。
@@ -60,14 +61,16 @@ LiveWall/
 
 ## 从源码构建
 
-在 Apple 芯片 Mac 上准备 Xcode 或 Command Line Tools、CMake 3.24+、pkg-config、Python 3 和 rustup。首次构建需要联网获取固定版本的源码与 Rust 依赖。Release 中的 `LiveWall-Studio-1.3.0-source.tar.gz` 随附上游、原生依赖和所用 Rust 依赖的源码。
+在 Apple 芯片 Mac 上准备 Xcode 或 Command Line Tools、CMake 3.24+、pkg-config、Python 3 和 rustup。首次构建需要联网获取固定版本的源码与 Rust 依赖。Release 中的 `LiveWall-Studio-版本号-source.tar.gz` 随附上游、原生依赖和所用 Rust 依赖的源码。
 
 ```bash
 ./script/build-renderer.sh
 python3 script/package.py
 ```
 
-输出为 `dist/LiveWall-Studio-1.3.0-macOS-arm64.dmg`。构建流程使用公开源码、应用图标和编译工具，自行构建时同样不需要把壁纸或 Wallpaper Engine 的共享资源放进安装包。
+输出为 `dist/LiveWall-Studio-版本号-macOS-arm64.dmg`。
+
+如需把自己的共享资源带到另一台 Mac，可运行 `python3 script/package.py --personal-assets "/路径/assets"`。自用 DMG 放在 `dist/personal/`。公开分发素材前请核对是否取得相应的再分发授权。
 
 ## 许可
 

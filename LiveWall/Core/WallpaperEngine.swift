@@ -32,6 +32,12 @@ final class WallpaperEngine: ObservableObject {
             updatePlaybackStates()
         }
     }
+    @Published var saveEnergyOnBattery: Bool {
+        didSet {
+            persist()
+            updatePlaybackStates()
+        }
+    }
 
     private let store = SettingsStore()
     private var settings: StoredSettings
@@ -39,6 +45,7 @@ final class WallpaperEngine: ObservableObject {
 
     private let powerMonitor = PowerMonitor()
     private var isSystemSleeping = false
+    private var areScreensSleeping = false
     private var isSessionInactive = false
     private var isOnBattery = false
     private var isLowPowerMode = false
@@ -49,6 +56,7 @@ final class WallpaperEngine: ObservableObject {
         settings = store.load()
         pauseOnBattery = settings.pauseOnBattery
         pauseOnLowPower = settings.pauseOnLowPower
+        saveEnergyOnBattery = settings.saveEnergyOnBattery
         isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
 
         NotificationCenter.default.addObserver(
@@ -75,11 +83,11 @@ final class WallpaperEngine: ObservableObject {
             name: NSWorkspace.didWakeNotification, object: nil
         )
         workspaceCenter.addObserver(
-            self, selector: #selector(systemWillSleep),
+            self, selector: #selector(screensDidSleep),
             name: NSWorkspace.screensDidSleepNotification, object: nil
         )
         workspaceCenter.addObserver(
-            self, selector: #selector(systemDidWake),
+            self, selector: #selector(screensDidWake),
             name: NSWorkspace.screensDidWakeNotification, object: nil
         )
         // Fast user switching: the desktop window doesn't count as occluded
@@ -130,6 +138,7 @@ final class WallpaperEngine: ObservableObject {
             url: url,
             scaling: assignment.scaling,
             position: fillPosition(for: url),
+            frameRate: frameRate(for: url),
             muted: assignment.muted,
             volume: assignment.volume
         )
@@ -173,6 +182,24 @@ final class WallpaperEngine: ObservableObject {
 
     func fillPosition(for url: URL) -> FillPosition {
         settings.wallpaperPositions[Self.wallpaperKey(for: url)] ?? .center
+    }
+
+    static let availableFrameRates = [12, 15, 24, 30, 45, 60]
+
+    func frameRate(for url: URL) -> Int {
+        settings.wallpaperFrameRates[Self.wallpaperKey(for: url)] ?? 0
+    }
+
+    func setFrameRate(_ fps: Int, for url: URL) {
+        guard (fps == 0 || Self.availableFrameRates.contains(fps)), frameRate(for: url) != fps else { return }
+        let key = Self.wallpaperKey(for: url)
+        objectWillChange.send()
+        settings.wallpaperFrameRates[key] = fps == 0 ? nil : fps
+        for controller in controllers.values {
+            guard let current = controller.videoURL, Self.wallpaperKey(for: current) == key else { continue }
+            controller.setFrameRate(fps)
+        }
+        persist()
     }
 
     func setFillPosition(_ position: FillPosition, for url: URL) {
@@ -305,6 +332,7 @@ final class WallpaperEngine: ObservableObject {
                 controller.update(screen: screen)
             } else {
                 let controller = WallpaperScreenController(screen: screen, displayKey: key)
+                controller.setSceneEnergySaving(saveEnergyOnBattery && isOnBattery)
                 controller.onOcclusionChanged = { [weak self] in
                     self?.updatePlaybackStates()
                 }
@@ -336,6 +364,7 @@ final class WallpaperEngine: ObservableObject {
             url: url,
             scaling: scaling(for: url),
             position: fillPosition(for: url),
+            frameRate: frameRate(for: url),
             muted: assignment.muted,
             volume: assignment.volume,
             trimStart: assignment.trimStart,
@@ -352,6 +381,16 @@ final class WallpaperEngine: ObservableObject {
 
     @objc private func systemDidWake() {
         isSystemSleeping = false
+        updatePlaybackStates()
+    }
+
+    @objc private func screensDidSleep() {
+        areScreensSleeping = true
+        updatePlaybackStates()
+    }
+
+    @objc private func screensDidWake() {
+        areScreensSleeping = false
         updatePlaybackStates()
     }
 
@@ -376,10 +415,11 @@ final class WallpaperEngine: ObservableObject {
     }
 
     private func updatePlaybackStates() {
-        let globallyPaused = manuallyPaused || isSystemSleeping || isSessionInactive
+        let globallyPaused = manuallyPaused || isSystemSleeping || areScreensSleeping || isSessionInactive
             || (pauseOnBattery && isOnBattery)
             || (pauseOnLowPower && isLowPowerMode)
         for controller in controllers.values {
+            controller.setSceneEnergySaving(saveEnergyOnBattery && isOnBattery)
             if controller.hasVideo && !globallyPaused && !controller.isOccluded {
                 controller.play()
             } else {
@@ -395,6 +435,7 @@ final class WallpaperEngine: ObservableObject {
         persistWorkItem = nil
         settings.pauseOnBattery = pauseOnBattery
         settings.pauseOnLowPower = pauseOnLowPower
+        settings.saveEnergyOnBattery = saveEnergyOnBattery
         store.save(settings)
     }
 

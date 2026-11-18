@@ -24,6 +24,7 @@ final class WallpaperScreenController {
     private var accessingSecurityScope = false
     private var scaling = ScalingMode.fill
     private var fillPosition = FillPosition.center
+    private var saveSceneEnergy = false
     private var occlusionObserver: NSObjectProtocol?
 
     init(screen: NSScreen, displayKey: String) {
@@ -66,6 +67,7 @@ final class WallpaperScreenController {
         url: URL,
         scaling: ScalingMode,
         position: FillPosition,
+        frameRate: Int,
         muted: Bool,
         volume: Float,
         trimStart: Double? = nil,
@@ -74,7 +76,8 @@ final class WallpaperScreenController {
         let workshop = WorkshopScene(url)
         var newScene: SceneWallpaperView?
         if let workshop {
-            newScene = SceneWallpaperView(scene: workshop, screen: screen, scaling: scaling, position: position, muted: muted, volume: volume) {
+            newScene = SceneWallpaperView(scene: workshop, screen: screen, scaling: scaling, position: position,
+                                          muted: muted, volume: volume, frameRate: frameRate, saveEnergy: saveSceneEnergy) {
                 NSLog("LiveWall scene did not render: %@", workshop.title)
             }
             guard newScene != nil else { return }
@@ -99,10 +102,12 @@ final class WallpaperScreenController {
                 frame: NSRect(origin: .zero, size: screen.frame.size),
                 image: image,
                 animated: kind == .animatedImage,
-                scaling: scaling
+                scaling: scaling,
+                sourceURL: url
             )
             imageView = view
             view.fillPosition = position
+            view.setFrameRate(frameRate)
             window.contentView = view
             window.setFrame(screen.frame, display: true)
             window.orderFront(nil)
@@ -200,6 +205,16 @@ final class WallpaperScreenController {
     func setVolume(_ volume: Float) {
         player?.volume = volume
         sceneView?.volume = volume
+    }
+
+    func setSceneEnergySaving(_ enabled: Bool) {
+        saveSceneEnergy = enabled
+        sceneView?.setEnergySaving(enabled)
+    }
+
+    func setFrameRate(_ fps: Int) {
+        sceneView?.setFrameRate(fps)
+        imageView?.setFrameRate(fps)
     }
 
     func play() {

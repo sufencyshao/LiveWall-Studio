@@ -18,15 +18,19 @@ struct StoredSettings: Codable {
     var assignments: [String: StoredAssignment] = [:]
     var wallpaperScaling: [String: ScalingMode]?
     var wallpaperPositions: [String: FillPosition] = [:]
+    var wallpaperFrameRates: [String: Int] = [:]
     var pauseOnBattery: Bool = false
     var pauseOnLowPower: Bool = true
+    var saveEnergyOnBattery: Bool = true
 
     private enum CodingKeys: String, CodingKey {
         case assignments
         case wallpaperScaling
         case wallpaperPositions
+        case wallpaperFrameRates
         case pauseOnBattery
         case pauseOnLowPower
+        case saveEnergyOnBattery
     }
 
     init() {}
@@ -41,8 +45,10 @@ struct StoredSettings: Codable {
         ) ?? [:]
         wallpaperScaling = try container.decodeIfPresent([String: ScalingMode].self, forKey: .wallpaperScaling)
         wallpaperPositions = try container.decodeIfPresent([String: FillPosition].self, forKey: .wallpaperPositions) ?? [:]
+        wallpaperFrameRates = try container.decodeIfPresent([String: Int].self, forKey: .wallpaperFrameRates) ?? [:]
         pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery) ?? false
         pauseOnLowPower = try container.decodeIfPresent(Bool.self, forKey: .pauseOnLowPower) ?? true
+        saveEnergyOnBattery = try container.decodeIfPresent(Bool.self, forKey: .saveEnergyOnBattery) ?? true
     }
 }
 

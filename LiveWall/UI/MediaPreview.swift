@@ -272,22 +272,47 @@ struct WallpaperScalingMenu: View {
     }
 }
 
+struct WallpaperFrameRatePicker: View {
+    @ObservedObject var engine: WallpaperEngine
+    let url: URL
+
+    static func supports(_ url: URL) -> Bool {
+        guard let kind = MediaKind(url: url) else { return false }
+        return kind == .animatedImage || kind == .scene
+    }
+
+    var body: some View {
+        Picker("壁纸帧率", selection: Binding(
+            get: { engine.frameRate(for: url) },
+            set: { engine.setFrameRate($0, for: url) }
+        )) {
+            Text("自动").tag(0)
+            ForEach(WallpaperEngine.availableFrameRates, id: \.self) { fps in
+                Text("\(fps) 帧/秒").tag(fps)
+            }
+        }
+    }
+}
+
 private struct FramedImagePreview: NSViewRepresentable {
     let url: URL?
     let animated: Bool
     let scaling: ScalingMode
     let position: FillPosition
+    let frameRate: Int
 
     func makeNSView(context: Context) -> ImageWallpaperView {
         let image = url.flatMap { NSImage(contentsOf: $0) } ?? NSImage(size: NSSize(width: 1, height: 1))
-        let view = ImageWallpaperView(frame: .zero, image: image, animated: animated, scaling: scaling)
+        let view = ImageWallpaperView(frame: .zero, image: image, animated: animated, scaling: scaling, sourceURL: url)
         view.fillPosition = position
+        view.setFrameRate(frameRate)
         return view
     }
 
     func updateNSView(_ view: ImageWallpaperView, context: Context) {
         view.apply(scaling)
         view.fillPosition = position
+        view.setFrameRate(frameRate)
     }
 }
 
@@ -296,6 +321,7 @@ private struct LiveScenePreview: NSViewRepresentable {
     let size: CGSize
     let scaling: ScalingMode
     let position: FillPosition
+    let frameRate: Int
     let onReady: () -> Void
     let onFailure: () -> Void
 
@@ -304,7 +330,7 @@ private struct LiveScenePreview: NSViewRepresentable {
         guard let screen = NSScreen.main ?? NSScreen.screens.first,
               let sceneView = SceneWallpaperView(scene: scene, screen: screen, scaling: scaling,
                                                   position: position, muted: true, volume: 0,
-                                                  previewSize: size, onReady: onReady,
+                                                  frameRate: frameRate, previewSize: size, onReady: onReady,
                                                   onLoadFailure: onFailure) else {
             DispatchQueue.main.async(execute: onFailure)
             return container
@@ -317,6 +343,7 @@ private struct LiveScenePreview: NSViewRepresentable {
         guard let sceneView = view.subviews.first as? SceneWallpaperView else { return }
         sceneView.setScaling(scaling)
         sceneView.setFillPosition(scaling == .fill ? position : .center)
+        sceneView.setFrameRate(frameRate)
     }
 
     static func dismantleNSView(_ view: NSView, coordinator: ()) {
@@ -346,6 +373,7 @@ struct WallpaperPreviewSheet: View {
     var body: some View {
         let scaling = engine.scaling(for: url)
         let position = engine.fillPosition(for: url)
+        let frameRate = engine.frameRate(for: url)
         let scene = WorkshopScene(url)
         let size = previewSize
         VStack(alignment: .leading, spacing: 12) {
@@ -354,6 +382,7 @@ struct WallpaperPreviewSheet: View {
                 .overlay {
                     if let scene {
                         LiveScenePreview(scene: scene, size: size, scaling: scaling, position: position,
+                                         frameRate: frameRate,
                                          onReady: { sceneReady = true }, onFailure: { sceneFailed = true })
                         if sceneFailed {
                             Label(scene.hasAssets ? "无法载入场景预览" : "缺少 Wallpaper Engine 的 assets 文件夹",
@@ -368,7 +397,7 @@ struct WallpaperPreviewSheet: View {
                         LiveVideoPreview(url: url, gravity: scaling.videoGravity, muted: muted, fillPosition: position)
                     } else {
                         FramedImagePreview(url: url, animated: MediaKind(url: url) == .animatedImage,
-                                           scaling: scaling, position: position)
+                                           scaling: scaling, position: position, frameRate: frameRate)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -384,6 +413,10 @@ struct WallpaperPreviewSheet: View {
                     positionSlider("水平", start: "左", end: "右", axis: \.x)
                     positionSlider("垂直", start: "上", end: "下", axis: \.y)
                 }
+            }
+
+            if WallpaperFrameRatePicker.supports(url) {
+                WallpaperFrameRatePicker(engine: engine, url: url).fixedSize()
             }
 
             HStack(alignment: .firstTextBaseline) {
