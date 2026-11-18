@@ -25,6 +25,7 @@ final class WallpaperScreenController {
     private var scaling = ScalingMode.fill
     private var fillPosition = FillPosition.center
     private var saveSceneEnergy = false
+    private var sceneBehindApp = false
     private var occlusionObserver: NSObjectProtocol?
 
     init(screen: NSScreen, displayKey: String) {
@@ -55,6 +56,7 @@ final class WallpaperScreenController {
     }
 
     var hasVideo: Bool { player != nil || imageView != nil || sceneView != nil }
+    var hasScene: Bool { sceneView != nil }
 
     /// Called after a display layout change — the NSScreen instance may have
     /// been recreated, so this just re-points at whatever the new one is.
@@ -91,6 +93,7 @@ final class WallpaperScreenController {
 
         if let newScene {
             sceneView = newScene
+            newScene.setBehindForegroundApp(sceneBehindApp)
             window.contentView = newScene
             window.setFrame(screen.frame, display: true)
             window.orderFront(nil)
@@ -210,6 +213,11 @@ final class WallpaperScreenController {
     func setSceneEnergySaving(_ enabled: Bool) {
         saveSceneEnergy = enabled
         sceneView?.setEnergySaving(enabled)
+    }
+
+    func setSceneBehindApp(_ behindApp: Bool) {
+        sceneBehindApp = behindApp
+        sceneView?.setBehindForegroundApp(behindApp)
     }
 
     func setFrameRate(_ fps: Int) {

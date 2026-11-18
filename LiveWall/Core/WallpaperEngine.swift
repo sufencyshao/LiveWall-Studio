@@ -38,6 +38,12 @@ final class WallpaperEngine: ObservableObject {
             updatePlaybackStates()
         }
     }
+    @Published var reduceScenesBehindApps: Bool {
+        didSet {
+            persist()
+            updatePlaybackStates()
+        }
+    }
 
     private let store = SettingsStore()
     private var settings: StoredSettings
@@ -51,12 +57,14 @@ final class WallpaperEngine: ObservableObject {
     private var isLowPowerMode = false
     private var reconcileWorkItem: DispatchWorkItem?
     private var persistWorkItem: DispatchWorkItem?
+    private var foregroundTimer: Timer?
 
     init() {
         settings = store.load()
         pauseOnBattery = settings.pauseOnBattery
         pauseOnLowPower = settings.pauseOnLowPower
         saveEnergyOnBattery = settings.saveEnergyOnBattery
+        reduceScenesBehindApps = settings.reduceScenesBehindApps
         isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
 
         NotificationCenter.default.addObserver(
@@ -74,6 +82,9 @@ final class WallpaperEngine: ObservableObject {
         )
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            workspaceCenter.addObserver(self, selector: #selector(foregroundChanged), name: name, object: nil)
+        }
         workspaceCenter.addObserver(
             self, selector: #selector(systemWillSleep),
             name: NSWorkspace.willSleepNotification, object: nil
@@ -115,6 +126,7 @@ final class WallpaperEngine: ObservableObject {
     }
 
     deinit {
+        foregroundTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
@@ -173,6 +185,7 @@ final class WallpaperEngine: ObservableObject {
         settings.assignments.removeValue(forKey: displayKey)
         persist()
         controllers[displayKey]?.clear()
+        updatePlaybackStates()
         rebuildDisplayStates()
     }
 
@@ -303,6 +316,8 @@ final class WallpaperEngine: ObservableObject {
     }
 
     func shutdown() {
+        foregroundTimer?.invalidate()
+        foregroundTimer = nil
         // Flush any save that's still sitting in the debounce window.
         persist()
         for controller in controllers.values {
@@ -426,6 +441,68 @@ final class WallpaperEngine: ObservableObject {
                 controller.pause()
             }
         }
+        updateForegroundMonitoring(running: reduceScenesBehindApps && !globallyPaused
+            && controllers.values.contains { $0.hasScene && !$0.isOccluded })
+    }
+
+    @objc private func foregroundChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.foregroundTimer != nil else { return }
+            self.refreshForegroundSceneMode()
+        }
+    }
+
+    private func updateForegroundMonitoring(running: Bool) {
+        if running {
+            guard foregroundTimer == nil else { return }
+            refreshForegroundSceneMode()
+            // Show Desktop can move windows without activating a different app.
+            // A single low-frequency scan covers that case and all displays.
+            let timer = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
+                self?.refreshForegroundSceneMode()
+            }
+            timer.tolerance = 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            foregroundTimer = timer
+        } else {
+            foregroundTimer?.invalidate()
+            foregroundTimer = nil
+            for controller in controllers.values { controller.setSceneBehindApp(false) }
+        }
+    }
+
+    private func refreshForegroundSceneMode() {
+        var visibleWindows: [CGRect] = []
+        let workspace = NSWorkspace.shared
+        if let front = workspace.frontmostApplication,
+           front.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+           let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+               as? [[String: Any]] {
+            visibleWindows = Self.foregroundWindowBounds(windows, owner: front.processIdentifier)
+        }
+
+        for controller in controllers.values where controller.hasScene {
+            let display = controller.screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            let behindApp = display.map { screen in
+                let bounds = CGDisplayBounds(screen.uint32Value)
+                return visibleWindows.contains { window in
+                    let visible = bounds.intersection(window)
+                    // Ignore the narrow slivers left by Show Desktop.
+                    return !visible.isNull && visible.width >= 100 && visible.height >= 75
+                }
+            } ?? false
+            controller.setSceneBehindApp(behindApp)
+        }
+    }
+
+    static func foregroundWindowBounds(_ windows: [[String: Any]], owner: pid_t) -> [CGRect] {
+        windows.compactMap { window in
+            guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == owner,
+                  (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  ((window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0) > 0.05,
+                  let value = window[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: value as CFDictionary)
+        }
     }
 
     // MARK: - Persistence
@@ -436,6 +513,7 @@ final class WallpaperEngine: ObservableObject {
         settings.pauseOnBattery = pauseOnBattery
         settings.pauseOnLowPower = pauseOnLowPower
         settings.saveEnergyOnBattery = saveEnergyOnBattery
+        settings.reduceScenesBehindApps = reduceScenesBehindApps
         store.save(settings)
     }
 

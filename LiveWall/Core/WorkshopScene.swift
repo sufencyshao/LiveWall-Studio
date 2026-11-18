@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import QuartzCore
 import Darwin
+import os
 
 struct WorkshopScene {
     let project: URL
@@ -172,6 +173,7 @@ private final class SceneAudioObserver {
 }
 
 final class SceneWallpaperView: NSView {
+    private static let renderLog = Logger(subsystem: "com.livewall.app", category: "scene-rendering")
     private let surface = CAMetalLayer()
     private let renderer: WorkshopRenderer
     private var handle: OpaquePointer?
@@ -184,6 +186,8 @@ final class SceneWallpaperView: NSView {
     private var saveEnergy = false
     private var audioReactive = false
     private var frameRate = 0
+    private var behindForegroundApp = false
+    private var appliedFrameRate: Int?
     private var renderScale: Double = 1
     private var appliedScaling: ScalingMode
     private var appliedFillPosition = FillPosition.center
@@ -326,12 +330,22 @@ final class SceneWallpaperView: NSView {
         updateRenderBudget()
     }
 
+    func setBehindForegroundApp(_ behindApp: Bool) {
+        guard behindForegroundApp != behindApp else { return }
+        behindForegroundApp = behindApp
+        updateRenderBudget()
+        Self.renderLog.debug("Foreground-app reduction: \(behindApp), scene FPS limit: \(self.appliedFrameRate ?? 0)")
+    }
+
     private func updateRenderBudget() {
         guard let handle else { return }
         let automatic = saveEnergy ? (audioReactive ? 30 : 24) : (audioReactive ? 60 : 30)
-        let fps = frameRate == 0 ? automatic : frameRate
+        let preferred = frameRate == 0 ? automatic : frameRate
+        let fps = behindForegroundApp ? max(12, preferred * 4 / 5) : preferred
         let scale = isPreview ? 0.5 : (saveEnergy ? 0.75 : 1)
+        guard fps != appliedFrameRate || scale != renderScale else { return }
         renderer.renderBudget(handle, UInt32(fps), scale == renderScale ? 0 : scale)
+        appliedFrameRate = fps
         renderScale = scale
     }
 

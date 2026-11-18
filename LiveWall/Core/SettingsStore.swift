@@ -22,6 +22,7 @@ struct StoredSettings: Codable {
     var pauseOnBattery: Bool = false
     var pauseOnLowPower: Bool = true
     var saveEnergyOnBattery: Bool = true
+    var reduceScenesBehindApps: Bool = true
 
     private enum CodingKeys: String, CodingKey {
         case assignments
@@ -31,6 +32,7 @@ struct StoredSettings: Codable {
         case pauseOnBattery
         case pauseOnLowPower
         case saveEnergyOnBattery
+        case reduceScenesBehindApps
     }
 
     init() {}
@@ -49,6 +51,7 @@ struct StoredSettings: Codable {
         pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery) ?? false
         pauseOnLowPower = try container.decodeIfPresent(Bool.self, forKey: .pauseOnLowPower) ?? true
         saveEnergyOnBattery = try container.decodeIfPresent(Bool.self, forKey: .saveEnergyOnBattery) ?? true
+        reduceScenesBehindApps = try container.decodeIfPresent(Bool.self, forKey: .reduceScenesBehindApps) ?? true
     }
 }
 

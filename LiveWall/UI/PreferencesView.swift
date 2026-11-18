@@ -43,6 +43,8 @@ struct PreferencesView: View {
                     Toggle("低电量模式下暂停", isOn: $engine.pauseOnLowPower)
                     Toggle("使用电池时降低场景壁纸能耗", isOn: $engine.saveEnergyOnBattery)
                         .help("降低渲染分辨率，并限制选择「自动」的场景帧率。手动帧率优先。")
+                    Toggle("使用其他应用时降低场景帧率", isOn: $engine.reduceScenesBehindApps)
+                        .help("逐显示器降低场景帧率，显示桌面后自动恢复。")
                     updateRow
                 }
                 .padding(4)
