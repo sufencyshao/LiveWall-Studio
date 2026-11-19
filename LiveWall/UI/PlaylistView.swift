@@ -220,6 +220,11 @@ struct PlaylistView: View {
                 }
                 .padding(12)
             }
+
+            BulkFrameRateMenu(hasTargets: !model.playlistFrameRateFiles(in: listID).isEmpty,
+                             help: "为此播放列表中的所有场景和 GIF 设置帧率") { fps in
+                model.setPlaylistFrameRate(fps, in: listID)
+            }
         }
     }
 

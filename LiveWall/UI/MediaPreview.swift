@@ -294,6 +294,28 @@ struct WallpaperFrameRatePicker: View {
     }
 }
 
+struct BulkFrameRateMenu: View {
+    let hasTargets: Bool
+    let help: String
+    let apply: (Int) -> Void
+
+    var body: some View {
+        Menu {
+            Button("全部设为自动") { apply(0) }
+            ForEach(WallpaperEngine.availableFrameRates, id: \.self) { fps in
+                Button("全部设为 \(fps) 帧/秒") { apply(fps) }
+            }
+        } label: {
+            Label("批量设置帧率", systemImage: "speedometer")
+        }
+        .labelStyle(.iconOnly)
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(help)
+        .disabled(!hasTargets)
+    }
+}
+
 private struct FramedImagePreview: NSViewRepresentable {
     let url: URL?
     let animated: Bool

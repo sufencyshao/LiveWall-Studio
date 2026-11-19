@@ -301,6 +301,9 @@ struct LibraryView: View {
             .fixedSize()
             .help("按名称或修改时间排序")
 
+            BulkFrameRateMenu(hasTargets: !model.frameRateFiles.isEmpty,
+                             help: "为壁纸库中的所有场景和 GIF 设置帧率",
+                             apply: model.setLibraryFrameRate)
             folderMenu
         }
         .fixedSize()

@@ -239,6 +239,42 @@ final class LibraryModel: ObservableObject {
         }.map(\.element)
     }
 
+    var frameRateFiles: [URL] {
+        files.filter(Self.maySupportFrameRate)
+    }
+
+    func playlistFrameRateFiles(in id: UUID) -> [URL] {
+        (list(id)?.items.map(\.url) ?? []).filter(Self.maySupportFrameRate)
+    }
+
+    private static func maySupportFrameRate(_ url: URL) -> Bool {
+        let filename = url.lastPathComponent.lowercased()
+        return filename == "project.json" || filename == "scene.pkg" || url.pathExtension.lowercased() == "gif"
+    }
+
+    func setLibraryFrameRate(_ fps: Int) {
+        applyFrameRate(fps, to: frameRateFiles)
+    }
+
+    func setPlaylistFrameRate(_ fps: Int, in id: UUID) {
+        let targets = playlistFrameRateFiles(in: id).filter { url in
+            guard canPlay(url), let kind = MediaKind(url: url) else { return false }
+            return kind == .scene || kind == .animatedImage
+        }
+        applyFrameRate(fps, to: targets)
+    }
+
+    private func applyFrameRate(_ fps: Int, to targets: [URL]) {
+        guard let engine else { return }
+        let count = engine.setFrameRate(fps, for: targets)
+        guard count > 0 else {
+            flash("没有可调整帧率的场景或 GIF。")
+            return
+        }
+        let rate = fps == 0 ? "自动" : "\(fps) 帧/秒"
+        flash("已将 \(count) 个场景或 GIF 的帧率设为\(rate)。")
+    }
+
     func isInTrash(_ url: URL) -> Bool {
         guard !data.trash.isEmpty else { return false }
         let key = LibraryFiles.key(for: url)

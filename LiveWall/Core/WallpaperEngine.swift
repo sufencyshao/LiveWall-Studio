@@ -204,15 +204,23 @@ final class WallpaperEngine: ObservableObject {
     }
 
     func setFrameRate(_ fps: Int, for url: URL) {
-        guard (fps == 0 || Self.availableFrameRates.contains(fps)), frameRate(for: url) != fps else { return }
-        let key = Self.wallpaperKey(for: url)
+        setFrameRate(fps, for: [url])
+    }
+
+    @discardableResult
+    func setFrameRate(_ fps: Int, for urls: [URL]) -> Int {
+        guard fps == 0 || Self.availableFrameRates.contains(fps) else { return 0 }
+        let keys = Set(urls.map(Self.wallpaperKey(for:)))
+        let changed = keys.filter { (settings.wallpaperFrameRates[$0] ?? 0) != fps }
+        guard !changed.isEmpty else { return keys.count }
         objectWillChange.send()
-        settings.wallpaperFrameRates[key] = fps == 0 ? nil : fps
+        for key in changed { settings.wallpaperFrameRates[key] = fps == 0 ? nil : fps }
         for controller in controllers.values {
-            guard let current = controller.videoURL, Self.wallpaperKey(for: current) == key else { continue }
+            guard let current = controller.videoURL, changed.contains(Self.wallpaperKey(for: current)) else { continue }
             controller.setFrameRate(fps)
         }
         persist()
+        return keys.count
     }
 
     func setFillPosition(_ position: FillPosition, for url: URL) {
