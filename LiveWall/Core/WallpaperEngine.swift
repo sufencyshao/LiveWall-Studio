@@ -175,10 +175,10 @@ final class WallpaperEngine: ObservableObject {
     /// back to any assigned video.
     var saverVideoURL: URL? {
         if let mainKey = NSScreen.main?.displayKey,
-           let url = controllers[mainKey]?.videoURL, WorkshopScene(url) == nil {
-            return url
+           let url = controllers[mainKey]?.videoURL, let file = MediaKind.videoFile(for: url) {
+            return file
         }
-        return controllers.values.compactMap { $0.videoURL }.first { WorkshopScene($0) == nil }
+        return controllers.values.compactMap { $0.videoURL.flatMap(MediaKind.videoFile(for:)) }.first
     }
 
     func removeVideo(from displayKey: String) {

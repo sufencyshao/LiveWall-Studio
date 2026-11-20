@@ -31,7 +31,7 @@ struct DisplayCardView: View {
             dropZone
 
             if let url = state.videoURL {
-                Text(WorkshopScene(url)?.title ?? url.lastPathComponent)
+                Text(LibraryFiles.projectTitle(for: url) ?? url.lastPathComponent)
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -207,8 +207,8 @@ struct DisplayCardView: View {
     }
 
     private func loadDuration() async {
-        guard let url = state.videoURL, MediaKind(url: url)?.isVideo == true else { return }
-        let asset = AVURLAsset(url: url)
+        guard let url = state.videoURL, let file = MediaKind.videoFile(for: url) else { return }
+        let asset = AVURLAsset(url: file)
         guard let duration = try? await asset.load(.duration).seconds,
               duration.isFinite, duration > 0 else { return }
         videoDuration = duration

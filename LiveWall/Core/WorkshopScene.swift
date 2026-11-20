@@ -62,6 +62,7 @@ private final class WorkshopRenderer {
     typealias RenderBudget = @convention(c) (OpaquePointer, UInt32, Double) -> Void
     typealias StartCapture = @convention(c) (UnsafeMutablePointer<Int32>) -> OpaquePointer?
     typealias StopCapture = @convention(c) (OpaquePointer) -> Void
+    typealias Spectrum = @convention(c) (UnsafeMutablePointer<Float>, UInt, UnsafeMutablePointer<UInt64>) -> Int32
     let open: Open
     let close: Close
     let pause: Pause
@@ -75,6 +76,7 @@ private final class WorkshopRenderer {
     let renderBudget: RenderBudget
     let startCapture: StartCapture
     let stopCapture: StopCapture
+    let spectrum: Spectrum?
     static let shared: WorkshopRenderer? = WorkshopRenderer()
 
     private init?() {
@@ -108,13 +110,16 @@ private final class WorkshopRenderer {
         self.renderBudget = unsafeBitCast(renderBudget, to: RenderBudget.self)
         self.startCapture = unsafeBitCast(startCapture, to: StartCapture.self)
         self.stopCapture = unsafeBitCast(stopCapture, to: StopCapture.self)
+        self.spectrum = dlsym(library, "owe_audio_current_spectrum_128").map { unsafeBitCast($0, to: Spectrum.self) }
     }
 }
 
 final class WorkshopAudioCapture: ObservableObject {
     static let shared = WorkshopAudioCapture()
     private static let preferenceKey = "LiveWallSystemAudioResponse"
+    private static let webPreferenceKey = "LiveWallWebAudioResponse"
     @Published private(set) var enabled = UserDefaults.standard.bool(forKey: preferenceKey)
+    @Published private(set) var webEnabled = UserDefaults.standard.bool(forKey: webPreferenceKey)
     @Published private(set) var status = ""
 
     private let queue = DispatchQueue(label: "com.livewall.audio-capture")
@@ -132,8 +137,23 @@ final class WorkshopAudioCapture: ObservableObject {
     }
 
     func setDemand(_ wantsAudio: Bool, for id: UUID) {
-        if wantsAudio { listeners.insert(id) } else { listeners.remove(id) }
+        let changed = wantsAudio ? listeners.insert(id).inserted : listeners.remove(id) != nil
+        guard changed else { return }
         reconcile()
+    }
+
+    func setWebEnabled(_ enabled: Bool) {
+        guard enabled != webEnabled else { return }
+        webEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.webPreferenceKey)
+    }
+
+    func spectrum() -> (bands: [Float], generation: UInt64)? {
+        guard capture != nil, let read = WorkshopRenderer.shared?.spectrum else { return nil }
+        var bands = [Float](repeating: 0, count: 128)
+        var generation: UInt64 = 0
+        guard read(&bands, UInt(bands.count), &generation) == 0 else { return nil }
+        return (bands, generation)
     }
 
     private func reconcile() {
@@ -143,7 +163,7 @@ final class WorkshopAudioCapture: ObservableObject {
                 let pointer = UInt(bitPattern: capture)
                 queue.async { WorkshopRenderer.shared?.stopCapture(OpaquePointer(bitPattern: pointer)!) }
             }
-            status = enabled ? "等待支持频谱的场景壁纸播放" : ""
+            status = enabled ? "等待支持频谱的壁纸播放" : ""
             return
         }
         guard !starting, capture == nil, let renderer = WorkshopRenderer.shared else { return }

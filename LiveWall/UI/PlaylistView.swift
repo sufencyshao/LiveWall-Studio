@@ -242,8 +242,14 @@ struct PlaylistView: View {
                 if model.isPaused {
                     Text("· 已暂停")
                 } else if let next = model.nextSwitch {
-                    let minutes = max(0, Int(ceil(next.timeIntervalSince(context.date) / 60)))
-                    Text("· \(minutes) 分钟后切换")
+                    let remaining = next.timeIntervalSince(context.date)
+                    if remaining <= 0 {
+                        Text("· 正在切换…")
+                    } else if remaining < 60 {
+                        Text("· 不到 1 分钟后切换")
+                    } else {
+                        Text("· \(Int(ceil(remaining / 60))) 分钟后切换")
+                    }
                 } else if list.wrappedValue.repeatOne {
                     Text("· 单个循环中")
                 }
@@ -360,7 +366,7 @@ private struct PlaylistWallpaperPicker: View {
     }
 
     private func title(_ url: URL) -> String {
-        WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent
+        LibraryFiles.projectTitle(for: url) ?? url.deletingPathExtension().lastPathComponent
     }
 
     private func tile(_ url: URL, alreadyAdded: Bool) -> some View {
@@ -437,7 +443,7 @@ struct PlaylistRow: View {
                 }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(WorkshopScene(item.url)?.title ?? item.url.deletingPathExtension().lastPathComponent)
+                Text(LibraryFiles.projectTitle(for: item.url) ?? item.url.deletingPathExtension().lastPathComponent)
                     .fontWeight(isPlaying ? .semibold : .regular)
                     .lineLimit(1)
                     .truncationMode(.middle)

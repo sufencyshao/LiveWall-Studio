@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 RENDERER = DIST / "renderer"
 VERSION = (ROOT / "VERSION").read_text().strip()
-BUILD = "133"
+BUILD = "134"
 MINIMUM_MACOS = "15.0"
 LIBRARIES = {
     "quickjs-ng": ["libqjs.0.dylib"],

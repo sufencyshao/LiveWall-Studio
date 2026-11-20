@@ -19,6 +19,9 @@ final class WallpaperScreenController {
     private let playerView: PlayerView
     private var imageView: ImageWallpaperView?
     private var sceneView: SceneWallpaperView?
+    private var webView: WebWallpaperView?
+    private var webMuted = true
+    private var webVolume: Float = 1
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private var accessingSecurityScope = false
@@ -55,7 +58,7 @@ final class WallpaperScreenController {
         }
     }
 
-    var hasVideo: Bool { player != nil || imageView != nil || sceneView != nil }
+    var hasVideo: Bool { player != nil || imageView != nil || sceneView != nil || webView != nil }
     var hasScene: Bool { sceneView != nil }
 
     /// Called after a display layout change — the NSScreen instance may have
@@ -100,6 +103,20 @@ final class WallpaperScreenController {
             return
         }
 
+        if let project = WorkshopWeb(url) {
+            let view = WebWallpaperView(project: project, frame: NSRect(origin: .zero, size: screen.frame.size),
+                                       muted: muted, volume: volume, scaling: scaling, position: position) {
+                NSLog("LiveWall could not open local web wallpaper: %@", project.title)
+            }
+            webView = view
+            webMuted = muted
+            webVolume = volume
+            window.contentView = view
+            window.setFrame(screen.frame, display: true)
+            window.orderFront(nil)
+            return
+        }
+
         if let kind = MediaKind(url: url), !kind.isVideo, let image = NSImage(contentsOf: url) {
             let view = ImageWallpaperView(
                 frame: NSRect(origin: .zero, size: screen.frame.size),
@@ -123,7 +140,8 @@ final class WallpaperScreenController {
         // A wallpaper video should never be the reason your Mac won't sleep.
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
 
-        looper = Self.makeLooper(player: queuePlayer, url: url, trimStart: trimStart, trimEnd: trimEnd)
+        guard let file = MediaKind.videoFile(for: url) else { clear(); return }
+        looper = Self.makeLooper(player: queuePlayer, url: file, trimStart: trimStart, trimEnd: trimEnd)
         player = queuePlayer
         playerView.display(queuePlayer)
         playerView.gravity = scaling.videoGravity
@@ -137,10 +155,10 @@ final class WallpaperScreenController {
     /// is non-destructive — the file is untouched, the looper just plays a
     /// slice of it.
     func setTrim(start: Double?, end: Double?) {
-        guard let player, let videoURL else { return }
+        guard let player, let videoURL, let file = MediaKind.videoFile(for: videoURL) else { return }
         looper?.disableLooping()
         player.removeAllItems()
-        looper = Self.makeLooper(player: player, url: videoURL, trimStart: start, trimEnd: end)
+        looper = Self.makeLooper(player: player, url: file, trimStart: start, trimEnd: end)
     }
 
     private static func makeLooper(
@@ -172,6 +190,7 @@ final class WallpaperScreenController {
         player?.pause()
         imageView = nil
         sceneView = nil
+        webView = nil
         window.contentView = playerView
         looper?.disableLooping()
         looper = nil
@@ -191,6 +210,7 @@ final class WallpaperScreenController {
         imageView?.apply(scaling)
         sceneView?.setScaling(scaling)
         sceneView?.setFillPosition(scaling == .fill ? fillPosition : .center)
+        webView?.setFraming(scaling, position: fillPosition)
     }
 
     func setFillPosition(_ position: FillPosition) {
@@ -198,14 +218,19 @@ final class WallpaperScreenController {
         playerView.fillPosition = position
         imageView?.fillPosition = position
         if scaling == .fill { sceneView?.setFillPosition(position) }
+        webView?.setFraming(scaling, position: position)
     }
 
     func setMuted(_ muted: Bool) {
+        webMuted = muted
+        webView?.setSound(muted: muted, volume: webVolume)
         player?.isMuted = muted
         sceneView?.muted = muted
     }
 
     func setVolume(_ volume: Float) {
+        webVolume = volume
+        webView?.setSound(muted: webMuted, volume: volume)
         player?.volume = volume
         sceneView?.volume = volume
     }
@@ -226,12 +251,14 @@ final class WallpaperScreenController {
     }
 
     func play() {
+        webView?.setPaused(false)
         player?.play()
         imageView?.setPaused(false)
         sceneView?.setPaused(false)
     }
 
     func pause() {
+        webView?.setPaused(true)
         player?.pause()
         imageView?.setPaused(true)
         sceneView?.setPaused(true)

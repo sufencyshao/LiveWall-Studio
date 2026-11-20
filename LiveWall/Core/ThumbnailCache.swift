@@ -5,7 +5,7 @@ import ImageIO
 
 /// What kind of file a wallpaper is.
 enum MediaKind {
-    case video, image, animatedImage, scene
+    case video, image, animatedImage, scene, web
 
     static let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tif", "tiff", "bmp"]
@@ -13,6 +13,8 @@ enum MediaKind {
 
     init?(url: URL) {
         if WorkshopScene(url) != nil { self = .scene; return }
+        if WorkshopVideo(url) != nil { self = .video; return }
+        if WorkshopWeb(url) != nil { self = .web; return }
         let ext = url.pathExtension.lowercased()
         if Self.videoExtensions.contains(ext) { self = .video }
         else if ext == "gif" { self = .animatedImage }
@@ -21,6 +23,11 @@ enum MediaKind {
     }
 
     var isVideo: Bool { self == .video }
+
+    static func videoFile(for url: URL) -> URL? {
+        if videoExtensions.contains(url.pathExtension.lowercased()) { return url }
+        return WorkshopVideo(url)?.file
+    }
 }
 
 /// Grabs a preview frame from a video or downsamples an image, and caches it
@@ -66,9 +73,9 @@ final class ThumbnailCache {
 
     /// Video length in seconds, nil for images or unreadable files.
     func duration(for url: URL) async -> Double? {
-        guard MediaKind(url: url) == .video else { return nil }
+        guard let file = MediaKind.videoFile(for: url) else { return nil }
         if let known = durations[url] { return known }
-        let asset = AVURLAsset(url: url)
+        let asset = AVURLAsset(url: file)
         guard let seconds = try? await asset.load(.duration).seconds,
               seconds.isFinite, seconds > 0 else { return nil }
         durations[url] = seconds
@@ -108,11 +115,14 @@ enum ThumbnailGenerator {
         let cgImage: CGImage?
         switch MediaKind(url: url) {
         case .video:
-            cgImage = videoFrame(url: url)
+            cgImage = WorkshopVideo(url)?.poster.flatMap { imageThumbnail(url: $0) }
+                ?? MediaKind.videoFile(for: url).flatMap { videoFrame(url: $0) }
         case .image, .animatedImage:
             cgImage = imageThumbnail(url: url)
         case .scene:
             cgImage = WorkshopScene(url)?.poster.flatMap { imageThumbnail(url: $0) }
+        case .web:
+            cgImage = WorkshopWeb(url)?.poster.flatMap { imageThumbnail(url: $0) }
         case nil:
             cgImage = nil
         }

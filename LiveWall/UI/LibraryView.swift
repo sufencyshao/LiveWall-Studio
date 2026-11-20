@@ -44,7 +44,7 @@ struct WallpaperCard<Menu: View>: View {
                 .animation(.easeOut(duration: 0.15), value: hovering)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
+                Text(LibraryFiles.projectTitle(for: url) ?? url.deletingPathExtension().lastPathComponent)
                     .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -124,7 +124,7 @@ struct LibraryView: View {
     }
 
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "全部", video = "视频", image = "图片", scene = "场景"
+        case all = "全部", video = "视频", image = "图片", scene = "场景", web = "网页"
         var id: String { rawValue }
     }
 
@@ -143,8 +143,9 @@ struct LibraryView: View {
             case .video: if kind?.isVideo != true { return false }
             case .image: if kind != .image && kind != .animatedImage { return false }
             case .scene: if kind != .scene { return false }
+            case .web: if kind != .web { return false }
             }
-            return query.isEmpty || (WorkshopScene(url)?.title ?? url.lastPathComponent).localizedCaseInsensitiveContains(query)
+            return query.isEmpty || (LibraryFiles.projectTitle(for: url) ?? url.lastPathComponent).localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -173,7 +174,7 @@ struct LibraryView: View {
                 EmptyStateView(
                     symbol: "photo.on.rectangle.angled",
                     title: "文件夹里没有可用的壁纸",
-                    detail: "将图片、视频或完整的场景项目拖到这里，即可复制到壁纸文件夹。",
+                    detail: "将图片、视频或完整的创意工坊项目拖到这里，即可复制到壁纸文件夹。",
                     button: "换一个文件夹…"
                 ) { model.chooseFolder() }
             } else {
@@ -247,16 +248,23 @@ struct LibraryView: View {
     }
 
     private var typeFilter: some View {
+        typePicker.pickerStyle(.segmented).labelsHidden()
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var typePicker: some View {
         Picker("类型", selection: $filter) {
             ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
         }
-        .pickerStyle(.segmented).labelsHidden()
-        .frame(width: 190)
     }
 
     private var search: some View {
         TextField("搜索", text: $query)
             .textFieldStyle(.roundedBorder)
+    }
+
+    private var compactSearch: some View {
+        search.frame(minWidth: 96, idealWidth: 135, maxWidth: 165)
     }
 
     private var sizeSlider: some View {
@@ -320,7 +328,13 @@ struct LibraryView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack { heading; sizeSlider; libraryActions }
-                HStack(spacing: 10) { typeFilter; search }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { typeFilter; compactSearch }
+                    HStack(spacing: 10) {
+                        typePicker.pickerStyle(.menu).labelsHidden().fixedSize()
+                        compactSearch
+                    }
+                }
             }
         }
         .padding(.horizontal, 18)

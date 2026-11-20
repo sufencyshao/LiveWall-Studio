@@ -61,7 +61,8 @@ final class LibraryModel: ObservableObject {
 
     enum WallpaperSwitch { case previous, next, random }
 
-    private var timer: Timer?
+    private var timer: DispatchSourceTimer?
+    private var wakeObservers: [NSObjectProtocol] = []
     private var pausedRemaining: TimeInterval?
     private var messageClear: DispatchWorkItem?
     private weak var engine: WallpaperEngine?
@@ -97,10 +98,23 @@ final class LibraryModel: ObservableObject {
 
         nowPlayingPath = engine.displayStates.first?.videoURL?.path
         refresh()
+        let workspace = NSWorkspace.shared.notificationCenter
+        wakeObservers = [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification].map { name in
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.advancePlaylistIfDue()
+            }
+        }
 
         if let active = data.active {
             let saved = UserDefaults.standard.integer(forKey: indexKey)
             DispatchQueue.main.async { [weak self] in self?.start(active, at: saved) }
+        }
+    }
+
+    deinit {
+        timer?.cancel()
+        for observer in wakeObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
 
@@ -197,10 +211,10 @@ final class LibraryModel: ObservableObject {
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
             )
-            let scenes = found.compactMap { folder -> URL? in
+            let projects = found.compactMap { folder -> URL? in
                 let project = folder.appendingPathComponent("project.json")
                 guard folder.lastPathComponent != "assets",
-                      WorkshopScene(project) != nil, !data.hiddenPaths.contains(project.path),
+                      MediaKind(url: project) != nil, !data.hiddenPaths.contains(project.path),
                       !trashed.contains(LibraryFiles.key(for: project)) else { return nil }
                 return project
             }
@@ -211,16 +225,16 @@ final class LibraryModel: ObservableObject {
                         && !trashed.contains(LibraryFiles.key(for: url))
                         && (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
                 }
-            modificationDates = Dictionary(uniqueKeysWithValues: (media + scenes).map { url in
-                let source = url.lastPathComponent == "project.json"
-                    ? url.deletingLastPathComponent().appendingPathComponent("scene.pkg") : url
+            modificationDates = Dictionary(uniqueKeysWithValues: (media + projects).map { url in
+                let source = MediaKind.videoFile(for: url) ?? WorkshopWeb(url)?.entry ?? WorkshopScene(url)?.project
+                    .deletingLastPathComponent().appendingPathComponent("scene.pkg") ?? url
                 let date = (try? source.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
                     ?? .distantPast
                 return (url, date)
             })
-            files = (media + scenes).sorted {
-                let lhs = WorkshopScene($0)?.title ?? $0.lastPathComponent
-                let rhs = WorkshopScene($1)?.title ?? $1.lastPathComponent
+            files = (media + projects).sorted {
+                let lhs = LibraryFiles.projectTitle(for: $0) ?? $0.lastPathComponent
+                let rhs = LibraryFiles.projectTitle(for: $1) ?? $1.lastPathComponent
                 return lhs.localizedStandardCompare(rhs) == .orderedAscending
             }
             if report { flash("已刷新，共 \(files.count) 个壁纸。") }
@@ -249,7 +263,8 @@ final class LibraryModel: ObservableObject {
 
     private static func maySupportFrameRate(_ url: URL) -> Bool {
         let filename = url.lastPathComponent.lowercased()
-        return filename == "project.json" || filename == "scene.pkg" || url.pathExtension.lowercased() == "gif"
+        return url.pathExtension.lowercased() == "gif"
+            || ((filename == "project.json" || filename == "scene.pkg") && WorkshopScene(url) != nil)
     }
 
     func setLibraryFrameRate(_ fps: Int) {
@@ -451,8 +466,14 @@ final class LibraryModel: ObservableObject {
         let id = listID ?? data.active
         let urls = id.flatMap { list($0)?.items.map(\.url) } ?? files
         let available = urls.indices.filter { canPlay(urls[$0]) }
-        guard let first = available.first, let last = available.last else { return }
         let rotating = id != nil && id == data.active
+        guard let first = available.first, let last = available.last else {
+            if rotating {
+                stop()
+                flash("播放列表里没有可播放的壁纸。")
+            }
+            return
+        }
         let currentPath = engine?.displayStates.first { $0.videoURL != nil }?.videoURL?.path ?? nowPlayingPath
         let current = rotating ? playingIndex : urls.firstIndex { $0.path == currentPath }
         let selected: Int
@@ -462,7 +483,8 @@ final class LibraryModel: ObservableObject {
         case .previous:
             selected = current.flatMap { index in available.last { $0 < index } } ?? last
         case .random:
-            selected = available.filter { urls[$0].path != currentPath }.randomElement() ?? first
+            let currentKey = current.flatMap { urls.indices.contains($0) ? LibraryFiles.key(for: urls[$0]) : nil }
+            selected = available.filter { LibraryFiles.key(for: urls[$0]) != currentKey }.randomElement() ?? first
         }
         if rotating {
             playingIndex = selected
@@ -485,9 +507,7 @@ final class LibraryModel: ObservableObject {
             rescheduleTimer(remaining: remaining)
         } else {
             pausedRemaining = nextSwitch.map { max(0, $0.timeIntervalSinceNow) }
-            timer?.invalidate()
-            timer = nil
-            nextSwitch = nil
+            cancelPlaylistTimer()
             isPaused = true
             engine?.setManuallyPaused(true)
         }
@@ -501,9 +521,7 @@ final class LibraryModel: ObservableObject {
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
-        nextSwitch = nil
+        cancelPlaylistTimer()
         pausedRemaining = nil
         data.active = nil
     }
@@ -515,8 +533,7 @@ final class LibraryModel: ObservableObject {
     }
 
     private func playCurrent() {
-        timer?.invalidate()
-        timer = nil
+        cancelPlaylistTimer()
         guard let id = data.active, let list = list(id), !list.items.isEmpty else {
             stop()
             return
@@ -535,20 +552,41 @@ final class LibraryModel: ObservableObject {
     }
 
     private func rescheduleTimer(remaining: TimeInterval? = nil) {
-        timer?.invalidate()
-        timer = nil
-        nextSwitch = nil
+        cancelPlaylistTimer()
         guard !isPaused, let id = data.active, let list = list(id),
               list.items.indices.contains(playingIndex), !list.repeatOne else { return }
         let interval = remaining ?? max(60, list.items[playingIndex].seconds)
-        let fire = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
-            guard let self, self.data.active == id else { return }
-            self.switchWallpaper(self.list(id)?.random == true ? .random : .next)
+        let deadline = Date().addingTimeInterval(interval)
+        nextSwitch = deadline
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self, self.nextSwitch == deadline else { return }
+            if Date() < deadline {
+                self.schedulePlaylistTimer(self.timer, at: deadline)
+            } else {
+                self.advancePlaylistIfDue()
+            }
         }
-        // .common so the switch still happens while a menu is open.
-        RunLoop.main.add(fire, forMode: .common)
-        timer = fire
-        nextSwitch = Date().addingTimeInterval(interval)
+        schedulePlaylistTimer(source, at: deadline)
+        timer = source
+        source.activate()
+    }
+
+    private func schedulePlaylistTimer(_ source: DispatchSourceTimer?, at deadline: Date) {
+        source?.schedule(wallDeadline: .now() + max(0, deadline.timeIntervalSinceNow), leeway: .milliseconds(100))
+    }
+
+    private func cancelPlaylistTimer() {
+        timer?.cancel()
+        timer = nil
+        nextSwitch = nil
+    }
+
+    func advancePlaylistIfDue(at now: Date = Date()) {
+        guard !isPaused, let deadline = nextSwitch, now >= deadline,
+              let id = data.active, let list = list(id), !list.repeatOne else { return }
+        cancelPlaylistTimer()
+        switchWallpaper(list.random ? .random : .next, in: id)
     }
 
     /// Call after toggling "repeat one" so the timer matches.
@@ -573,6 +611,9 @@ final class LibraryModel: ObservableObject {
                 flash("场景渲染引擎未能载入。")
                 return
             }
+        } else if url.lastPathComponent.lowercased() == "project.json", MediaKind(url: url) == nil {
+            flash("壁纸项目缺少可播放的文件。")
+            return
         }
         guard let engine else { return }
         for display in engine.displayStates {
@@ -583,6 +624,7 @@ final class LibraryModel: ObservableObject {
 
     private func canPlay(_ url: URL) -> Bool {
         !isInTrash(url) && FileManager.default.fileExists(atPath: url.path)
+            && (url.lastPathComponent.lowercased() != "project.json" || MediaKind(url: url) != nil)
     }
 
     private func flash(_ text: String) {

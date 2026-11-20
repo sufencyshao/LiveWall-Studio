@@ -207,7 +207,7 @@ struct NowPlayingBar: View {
                 HStack(spacing: 6) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("当前壁纸").font(.caption2).foregroundStyle(.secondary)
-                        Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
+                        Text(LibraryFiles.projectTitle(for: url) ?? url.deletingPathExtension().lastPathComponent)
                             .font(.caption)
                             .lineLimit(1)
                             .truncationMode(.middle)

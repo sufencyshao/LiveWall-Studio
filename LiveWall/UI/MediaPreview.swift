@@ -19,8 +19,9 @@ final class PreviewPlayerView: PlayerView {
 
     func load(_ url: URL, muted: Bool = true) {
         stop()
+        guard let file = MediaKind.videoFile(for: url) else { return }
         self.url = url
-        let item = AVPlayerItem(url: url)
+        let item = AVPlayerItem(url: file)
         item.preferredForwardBufferDuration = 2
         let queuePlayer = AVQueuePlayer()
         queuePlayer.isMuted = muted
@@ -189,6 +190,9 @@ struct KindBadge: View {
             case .scene:
                 Image(systemName: "sparkles")
                 Text("场景")
+            case .web:
+                Image(systemName: "globe")
+                Text("网页")
             case .image:
                 Image(systemName: "photo")
                 Text("图片")
@@ -373,6 +377,23 @@ private struct LiveScenePreview: NSViewRepresentable {
     }
 }
 
+private struct LiveWebPreview: NSViewRepresentable {
+    let project: WorkshopWeb
+    let size: CGSize
+    let scaling: ScalingMode
+    let position: FillPosition
+    let onFailure: () -> Void
+
+    func makeNSView(context: Context) -> WebWallpaperView {
+        WebWallpaperView(project: project, frame: CGRect(origin: .zero, size: size), muted: true,
+                         volume: 0, scaling: scaling, position: position, onFailure: onFailure)
+    }
+
+    func updateNSView(_ view: WebWallpaperView, context: Context) {
+        view.setFraming(scaling, position: position)
+    }
+}
+
 struct WallpaperPreviewSheet: View {
     @ObservedObject var engine: WallpaperEngine
     let url: URL
@@ -382,6 +403,7 @@ struct WallpaperPreviewSheet: View {
     @State private var info = ""
     @State private var sceneReady = false
     @State private var sceneFailed = false
+    @State private var webFailed = false
 
     private var previewSize: CGSize {
         let screen = NSScreen.main
@@ -397,6 +419,7 @@ struct WallpaperPreviewSheet: View {
         let position = engine.fillPosition(for: url)
         let frameRate = engine.frameRate(for: url)
         let scene = WorkshopScene(url)
+        let web = WorkshopWeb(url)
         let size = previewSize
         VStack(alignment: .leading, spacing: 12) {
             Color.black
@@ -414,6 +437,13 @@ struct WallpaperPreviewSheet: View {
                             ProgressView("正在渲染场景…")
                                 .foregroundStyle(.white)
                                 .colorScheme(.dark)
+                        }
+                    } else if let web {
+                        LiveWebPreview(project: web, size: size, scaling: scaling, position: position,
+                                       onFailure: { webFailed = true })
+                        if webFailed {
+                            Label("无法载入本地网页", systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.white)
                         }
                     } else if MediaKind(url: url)?.isVideo == true {
                         LiveVideoPreview(url: url, gravity: scaling.videoGravity, muted: muted, fillPosition: position)
@@ -443,7 +473,7 @@ struct WallpaperPreviewSheet: View {
 
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(WorkshopScene(url)?.title ?? url.deletingPathExtension().lastPathComponent)
+                    Text(LibraryFiles.projectTitle(for: url) ?? url.deletingPathExtension().lastPathComponent)
                         .font(.headline)
                         .lineLimit(1)
                     Text(info)
@@ -471,7 +501,10 @@ struct WallpaperPreviewSheet: View {
         }
         .padding(16)
         .frame(width: max(440, size.width) + 32)
-        .task(id: url) { info = scene == nil ? await Self.describe(url) : "场景壁纸" }
+        .task(id: url) {
+            if web != nil { info = "本地网页壁纸" }
+            else { info = scene == nil ? await Self.describe(url) : "场景壁纸" }
+        }
     }
 
     private func positionSlider(_ title: String, start: String, end: String,
@@ -494,8 +527,9 @@ struct WallpaperPreviewSheet: View {
 
     private static func describe(_ url: URL) async -> String {
         var parts: [String] = []
+        let file = MediaKind.videoFile(for: url) ?? url
         if MediaKind(url: url)?.isVideo == true {
-            let asset = AVURLAsset(url: url)
+            let asset = AVURLAsset(url: file)
             if let track = try? await asset.loadTracks(withMediaType: .video).first,
                let size = try? await track.load(.naturalSize) {
                 parts.append("\(Int(abs(size.width))) × \(Int(abs(size.height)))")
@@ -506,7 +540,7 @@ struct WallpaperPreviewSheet: View {
         } else if let rep = NSImageRep(contentsOf: url) {
             parts.append("\(rep.pixelsWide) × \(rep.pixelsHigh)")
         }
-        if let bytes = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+        if let bytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
         }
         return parts.joined(separator: " · ")

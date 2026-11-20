@@ -52,12 +52,17 @@ struct PreferencesView: View {
             }
 
             if #available(macOS 14.2, *) {
-                GroupBox("场景音频") {
+                GroupBox("壁纸音频") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("让场景壁纸跟随系统声音", isOn: Binding(
+                        Toggle("允许壁纸分析系统声音", isOn: Binding(
                             get: { workshopAudio.enabled },
                             set: { workshopAudio.setEnabled($0) }
                         ))
+                        Toggle("允许本地网页壁纸接收频谱", isOn: Binding(
+                            get: { workshopAudio.webEnabled },
+                            set: { workshopAudio.setWebEnabled($0) }
+                        ))
+                        .disabled(!workshopAudio.enabled)
                         if !workshopAudio.status.isEmpty {
                             Text(workshopAudio.status).font(.caption).foregroundStyle(.secondary)
                         }
