@@ -249,7 +249,7 @@ struct LibraryView: View {
 
     private var typeFilter: some View {
         typePicker.pickerStyle(.segmented).labelsHidden()
-            .fixedSize(horizontal: true, vertical: false)
+            .frame(width: 228)
     }
 
     private var typePicker: some View {
@@ -264,7 +264,7 @@ struct LibraryView: View {
     }
 
     private var compactSearch: some View {
-        search.frame(minWidth: 96, idealWidth: 135, maxWidth: 165)
+        search.frame(minWidth: 86, idealWidth: 125, maxWidth: 145)
     }
 
     private var sizeSlider: some View {
@@ -318,22 +318,23 @@ struct LibraryView: View {
     }
 
     private var header: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                heading.frame(minWidth: 140)
-                typeFilter
-                search.frame(width: 130)
-                sizeSlider
-                libraryActions
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                HStack { heading; sizeSlider; libraryActions }
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { typeFilter; compactSearch }
-                    HStack(spacing: 10) {
-                        typePicker.pickerStyle(.menu).labelsHidden().fixedSize()
-                        compactSearch
-                    }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack { heading; sizeSlider; libraryActions }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 0) {
+                    typePicker.pickerStyle(.segmented).labelsHidden().frame(width: 260)
+                    Spacer(minLength: 20)
+                    compactSearch
+                }
+                HStack(spacing: 0) {
+                    typeFilter
+                    Spacer(minLength: 16)
+                    search.frame(width: 78)
+                }
+                HStack(spacing: 0) {
+                    typePicker.pickerStyle(.menu).labelsHidden().frame(width: 118, alignment: .leading)
+                    Spacer(minLength: 16)
+                    compactSearch
                 }
             }
         }
